@@ -55,7 +55,14 @@ _LEADING_NUM = re.compile(r'^[\s\[\(]*[0-9０-９]{1,4}[\s.．_:：\-—–\)\]]
 #: Only a *padded* trailing number is a publisher's counter ("… - 001").  A bare
 #: one is usually the author's own subdivision: "Часть 1 - 1" is part one,
 #: chapter one, and stripping it would throw the chapter away.
-_TRAILING_NUM = re.compile(r'[\s._:\-—–]+(?:0[0-9]{1,3}|[0-9]{3,4})$')
+#:
+#: That holds past chapter 99 as well.  An unpadded ``[0-9]{3,4}`` branch used to
+#: sit here on the theory that a long trailing number must be a counter; across
+#: the library it matched 191 files and not one of them was.  It ate "Chapter
+#: 100"–"Chapter 280" throughout «Nineteen eighty-four», the datelines of the
+#: Czech diary chapters in «Porodní bába», and the book's own name in
+#: "Audiobook: 1984".  Padding is the only signal that separates the two.
+_TRAILING_NUM = re.compile(r'[\s._:\-—–]+0[0-9]{1,3}$')
 _ONLY_DIGITS = re.compile(r'^[\W_]*[0-9]+[\W_]*$')
 _NARRATOR = re.compile(r'\s*\((?:исполнитель|читает|gelesen von|read by|'
                        r'narrated by|čte|czyta)\s[^)]*\)', re.I)

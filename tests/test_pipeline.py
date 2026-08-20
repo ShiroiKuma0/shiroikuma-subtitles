@@ -756,7 +756,11 @@ def test_chapter_markers_are_kept_as_titles():
     from jisho_subs.metadata import BookInfo, clean_track_title
     info = BookInfo(directory="d", book="Erfolg", author="Lion Feuchtwanger")
     for marker in ("Kapitel 1", "Глава 7", "Chapitre 3", "第4章", "Vorrede",
-                   "Часть 1 - 1", "Book I"):
+                   "Часть 1 - 1", "Book I",
+                   # A book longer than 99 tracks numbers its chapters in three
+                   # digits, and they are still the author's: «Lázár» runs to
+                   # "Kapitel 111", «Nineteen eighty-four» to "Chapter 280".
+                   "Kapitel 100", "Kapitel 111", "Chapter 280"):
         title, why = clean_track_title(marker, info)
         assert title == marker, f"{marker!r} was dropped as {why!r}"
 
@@ -778,6 +782,36 @@ def test_padded_counters_go_but_authorial_numbers_stay():
     assert clean_track_title("Часть 1 - 1", info)[0] == "Часть 1 - 1"
     info2 = BookInfo(directory="d", book="Greenlights", author="X")
     assert clean_track_title("Greenlights - Part 1", info2)[0] == "Part 1"
+
+    # Padding is the whole signal, and length is not a substitute for it: a
+    # counter is written "001", an authorial number is written "100".
+    book = BookInfo(directory="d", book="Erfolg", author="Lion Feuchtwanger")
+    assert clean_track_title("Erfolg - 001", book)[0] is None
+    assert clean_track_title("Erfolg - 0001", book)[0] is None
+    assert clean_track_title("Kapitel 007", book)[0] == "Kapitel"
+    assert clean_track_title("Kapitel 100", book)[0] == "Kapitel 100"
+
+
+def test_a_long_number_is_not_a_counter():
+    """Ruling by digit count cost 191 files across the library, all authorial.
+
+    An unpadded three-to-four digit branch in ``_TRAILING_NUM`` stripped every
+    "Chapter 100"–"Chapter 280" in «Nineteen eighty-four», the datelines of the
+    Czech diary chapters, and the title of "Audiobook: 1984" itself — which is
+    the book's name, not a number after it.
+    """
+    from jisho_subs.metadata import BookInfo, clean_track_title
+    orwell = BookInfo(
+        directory="Nineteen eighty-four, George Orwell -- [197] (1948)",
+        book="Nineteen eighty-four", author="George Orwell")
+    for n in (99, 100, 101, 279, 280):
+        assert clean_track_title(f"Chapter {n}", orwell)[0] == f"Chapter {n}"
+    assert clean_track_title("Audiobook: 1984", orwell)[0] == "Audiobook: 1984"
+
+    czech = BookInfo(directory="Porodní bába, Katja Kettu -- [197] (2015)",
+                     book="Porodní bába", author="Katja Kettu")
+    dated = "Treti cast - Zapisky Mrtveho muze 12. 7. 1943"
+    assert clean_track_title(dated, czech)[0] == dated
 
 
 def test_built_tags_carry_the_folder_facts():
