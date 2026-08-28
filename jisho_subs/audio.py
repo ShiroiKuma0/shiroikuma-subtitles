@@ -17,6 +17,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -193,7 +194,7 @@ def format_hms(seconds: float) -> str:
     return f"{h:d}:{m:02d}:{s:02d}"
 
 
-def decode(path: str, sampling_rate: int = 16000):
+def decode(path: str, sampling_rate: int = 16000, on_seconds=None):
     """Decode to mono float32 through ffmpeg rather than PyAV.
 
     faster-whisper decodes with PyAV by default, and PyAV gives up early on
@@ -204,16 +205,40 @@ def decode(path: str, sampling_rate: int = 16000):
     book.  Silent loss that still yields plausible output is the worst failure
     mode there is, so decoding goes through ffmpeg, which reads these files
     correctly.  ``-vn -sn -dn`` drops the offending art outright.
+
+    ``on_seconds`` is called with the audio seconds decoded so far.  A whole
+    book in one file makes this worth reporting: at 767× realtime (measured,
+    this file) «Поколение «М»» still spends 67 s here before Whisper sees a
+    sample, and that minute belongs to a stage that would otherwise show
+    nothing at all.  Reading the pipe in chunks is the only change — the
+    samples are still counted afterwards by ``check_decode()``, which is what
+    catches a short read, streamed or not.
     """
     import numpy as np
 
-    proc = subprocess.run(
-        ["ffmpeg", "-nostdin", "-threads", "0", "-i", path,
-         "-vn", "-sn", "-dn",
-         "-f", "f32le", "-acodec", "pcm_f32le",
-         "-ac", "1", "-ar", str(sampling_rate), "-"],
-        capture_output=True, check=True)
-    return np.frombuffer(proc.stdout, dtype=np.float32).copy()
+    cmd = ["ffmpeg", "-nostdin", "-threads", "0", "-i", path,
+           "-vn", "-sn", "-dn",
+           "-f", "f32le", "-acodec", "pcm_f32le",
+           "-ac", "1", "-ar", str(sampling_rate), "-"]
+    # stderr goes to a file, never to a pipe: nothing drains it until ffmpeg
+    # has exited, and a pipe nobody drains deadlocks the process that fills it.
+    buf = bytearray()
+    with tempfile.TemporaryFile() as errors:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errors)
+        with proc.stdout as stream:
+            while True:
+                chunk = stream.read(1 << 22)
+                if not chunk:
+                    break
+                buf += chunk
+                if on_seconds is not None:
+                    on_seconds(len(buf) / 4.0 / sampling_rate)
+        status = proc.wait()
+        if status != 0:
+            errors.seek(0)
+            raise subprocess.CalledProcessError(status, cmd,
+                                                stderr=errors.read())
+    return np.frombuffer(buf, dtype=np.float32).copy()
 
 
 def decoded_seconds(samples, sampling_rate: int = 16000) -> float:

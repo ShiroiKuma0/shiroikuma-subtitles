@@ -146,7 +146,18 @@ class Transcriber:
     # -- transcription ---------------------------------------------------
 
     def transcribe(self, audio: AudioFile, language: str,
-                   force: bool = False) -> Transcript:
+                   force: bool = False, on_progress=None) -> Transcript:
+        """Transcribe one file, reporting the audio second it has reached.
+
+        ``on_progress(seconds, phase="")`` exists because the caller's bar
+        counts files, and a book delivered as a single fourteen-hour M4B is one
+        file: without a position inside it there is nothing to draw for a
+        quarter of an hour.  The segments arrive from a generator, so this
+        costs nothing — the work was always incremental, it simply had no way
+        to say so.  The two phases that precede the first segment name
+        themselves, because a minute of ffmpeg and Silero's pass over the whole
+        file are not transcription and must not be counted as it.
+        """
         cache_path = self._cache_path(audio.path, language)
         self.last_cached = False
         if not force:
@@ -159,8 +170,13 @@ class Transcriber:
         self._ensure_model()
         # Decode ourselves rather than letting faster-whisper reach for PyAV,
         # which silently truncates files with malformed cover art.
-        samples = decode(audio.path)
+        report = on_progress or (lambda *a, **k: None)
+        samples = decode(audio.path,
+                         on_seconds=lambda done: report(done, "decoding"))
         check_decode(audio.path, samples, audio.duration, log=self.log)
+        # Silero runs over the whole file before the first segment appears,
+        # which on fourteen hours is another stretch of an empty line.
+        report(None, "finding speech")
         segments, _info = self._pipeline.transcribe(
             samples,
             batch_size=self.batch_size,
@@ -176,6 +192,7 @@ class Transcriber:
                 text = w.word.strip()
                 if text:
                     words.append(Word(text, float(w.start), float(w.end)))
+            report(float(seg.end))
         transcript = Transcript(audio.path, words)
         self._store(cache_path, transcript)
         return transcript

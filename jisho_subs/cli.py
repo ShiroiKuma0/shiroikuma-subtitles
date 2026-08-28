@@ -678,7 +678,10 @@ def _run_one_book(args, plan) -> bool:
     transcripts = []
     for f in files:
         bar.note(f.name)
-        transcripts.append(tr.transcribe(f, lang, force=args.force))
+        transcripts.append(tr.transcribe(
+            f, lang, force=args.force,
+            on_progress=lambda done, phase="", f=f: bar.within(
+                f.name, done, f.duration, phase)))
         bar.advance(f.name, weight=0.0 if tr.last_cached else f.duration)
     bar.close(f"{tr.cache_hits} from cache" if tr.cache_hits else "")
 

@@ -180,6 +180,24 @@ read "5/20" beside the name of file 20 — which looks like a stuck bar that the
 jumps. Parallel stages (converting, snapping, writing) advance on completion
 only; the sequential one (transcribing) still shows what is in flight.
 
+**A counter of files is no unit at all when the book is one file.** «Поколение
+«М»» arrived as a single 14 h 15 m M4B, so `transcribing` read `0/1` with an
+empty bar for the whole twelve-minute stage — no movement, no throughput, no
+estimate, and indistinguishable from a hung process, which is how it was read.
+`Progress.within()` takes the position inside the item in flight and lets the
+bar, the estimate and the ×realtime figure describe the file while the counter
+goes on meaning files finished. Two consequences worth keeping: with a single
+item the `1/1` and the never-changing filename are both dropped, because the
+position is the only thing on the line that moves; and the work before the
+first Whisper segment — 67 s of ffmpeg, then Silero over all fourteen hours —
+is reported under its own name and claims none of the bar, since counting it as
+transcription would put a number under "transcribing" that is not transcription.
+
+**A phase that ends inside the redraw interval is never drawn again.** Decoding
+finished 40 ms before speech detection started, the 0.08 s throttle swallowed
+the frame, and nothing redraws until the first segment — so the line sat on
+`decoding` for the whole of the VAD pass. Phase changes force a draw.
+
 **Do not measure a stream copy in xrealtime.** The remux is bound by disk
 throughput, not audio duration — 330 MB/s, 0.03 s per file — so the library's
 30 GB converts in about ninety seconds. Reasoning from a xrealtime figure gave

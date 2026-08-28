@@ -383,6 +383,137 @@ def test_progress_degrades_to_plain_lines_when_not_a_terminal():
     assert "10/10" in text
 
 
+def test_a_single_long_file_still_moves_the_bar():
+    """One M4B holding the whole book is `0/1` for a quarter of an hour."""
+    import io
+    from jisho_subs.progress import Progress
+
+    p = Progress(1, "transcribing", stream=io.StringIO(), enabled=True)
+    p.started -= 60
+    p.within("PokolenieM.m4b", 3600.0, 51306.0)     # an hour into fourteen
+    line = p._compose("PokolenieM.m4b", 120)
+    assert "1:00:00/14:15:06" in line
+    assert "  7%" in line, "the bar must read the position, not the counter"
+    assert "1/1" not in line, "a counter of one item says nothing"
+    assert "--:--" not in line, "the estimate is real once the position is known"
+    assert "60×" in line, "throughput too: an hour of audio in a minute"
+
+
+def test_position_inside_a_file_never_retreats():
+    """Batched Whisper yields a batch at a time; a bar that goes back reads as a bug."""
+    import io
+    from jisho_subs.progress import Progress
+
+    p = Progress(1, "transcribing", stream=io.StringIO(), enabled=True)
+    p.within("a.m4b", 900.0, 3600.0)
+    p.within("a.m4b", 300.0, 3600.0)
+    assert p._partial == 0.25
+
+
+def test_finishing_a_file_does_not_count_its_position_twice():
+    import io
+    from jisho_subs.progress import Progress
+
+    p = Progress(2, "transcribing", stream=io.StringIO(), enabled=True)
+    p.within("a.m4b", 1800.0, 3600.0)
+    p.advance("a.m4b", weight=3600.0)
+    assert (p.done, p.weight) == (1, 3600.0)
+    assert (p._partial, p._partial_weight, p._position) == (0.0, 0.0, "")
+    assert "1/2" in p._compose("b.m4b", 120), "many files still count files"
+
+
+def test_with_one_file_the_position_outranks_its_unchanging_name():
+    """The name is the same for the whole stage; the position is what moves."""
+    import io
+    from jisho_subs.progress import Progress
+
+    for width in (170, 140, 120, 100, 88, 76, 64, 52, 40):
+        for done, phase in ((12000.0, ""), (12000.0, "decoding")):
+            p = Progress(1, "transcribing", tag="[jisho-subs] ",
+                         stream=io.StringIO(), enabled=True)
+            p.started -= 300
+            p.within("PokolenieM.m4b", done, 51306.0, phase)
+            line = p._compose("PokolenieM.m4b", width)
+            assert len(line) <= width, \
+                f"{width}/{phase or 'transcribing'}: overflowed by {len(line) - width}"
+            if width >= 64:
+                assert "3:20:00/14:15:06" in line, \
+                    f"{width}/{phase or 'transcribing'}: the line stopped moving"
+
+
+def test_with_many_files_the_name_still_outranks_the_position():
+    import io
+    from jisho_subs.progress import Progress
+
+    for width in (170, 140, 120, 100, 88, 76):
+        p = Progress(111, "transcribing", tag="[jisho-subs] ",
+                     stream=io.StringIO(), enabled=True)
+        p.done, p.weight, p.started = 14, 3500.0, p.started - 30
+        p.within("014_111_9783732422098_DEXN82531614.mp3", 120.0, 640.0)
+        line = p._compose("014_111_9783732422098_DEXN82531614.mp3", width)
+        assert len(line) <= width, f"{width}: overflowed by {len(line) - width}"
+        assert "014_111" in line, f"{width}: lost the filename"
+
+
+def test_a_named_phase_is_shown_but_claims_none_of_the_bar():
+    """A minute of ffmpeg is not transcription and is not counted as it."""
+    import io
+    from jisho_subs.progress import Progress
+
+    p = Progress(1, "transcribing", stream=io.StringIO(), enabled=True)
+    p.within("a.m4b", 1800.0, 3600.0, "decoding")
+    assert (p._partial, p._partial_weight) == (0.0, 0.0)
+    line = p._compose("a.m4b", 120)
+    assert "decoding 30:00/1:00:00" in line and "  0%" in line
+    p.within("a.m4b", 900.0, 3600.0)
+    assert p._partial == 0.25, "real progress supersedes the phase"
+    assert "decoding" not in p._compose("a.m4b", 120)
+
+
+def test_a_phase_change_is_always_drawn():
+    """A throttled draw nothing repeats leaves the wrong label on the screen."""
+    import io
+    from jisho_subs.progress import Progress
+
+    out = io.StringIO()
+    p = Progress(1, "transcribing", stream=out, enabled=True)
+    p.within("a.m4b", 3600.0, 3600.0, "decoding")
+    p.within("a.m4b", None, 3600.0, "finding speech")   # inside the interval
+    p.within("a.m4b", 12.0, 3600.0)                     # and back to the work
+    frames = out.getvalue().split("\r")
+    assert any("decoding" in f for f in frames)
+    assert any("finding speech" in f for f in frames)
+    assert any("0:12/1:00:00" in f for f in frames)
+
+
+def test_a_phase_with_nothing_to_count_still_says_what_it_is():
+    """Silero reads the whole file before the first segment appears."""
+    import io
+    from jisho_subs.progress import Progress
+
+    p = Progress(1, "transcribing", stream=io.StringIO(), enabled=True)
+    p.within("a.m4b", None, 3600.0, "finding speech")
+    assert "finding speech" in p._compose("a.m4b", 120)
+    assert p._partial == 0.0
+
+
+def test_a_long_single_file_writes_deciles_to_a_log():
+    """Not a terminal: the one advance at the end is not a progress report."""
+    import io
+    from jisho_subs.progress import Progress
+
+    out = io.StringIO()
+    p = Progress(1, "transcribing", stream=out, enabled=False)
+    for done in range(0, 51306, 2000):
+        p.within("PokolenieM.m4b", float(done), 51306.0)
+    p.advance("PokolenieM.m4b", weight=51306.0)
+    p.close()
+    text = out.getvalue()
+    assert "\r" not in text, "carriage returns must not reach a log file"
+    assert 4 <= text.count("\n") <= 12, "a line per decile, not per batch"
+    assert "1/1" in text
+
+
 def test_implausibly_short_interpolations_are_reported():
     from jisho_subs.report import implausible
 
@@ -414,6 +545,39 @@ def test_only_mp3_is_flagged_for_conversion(tmp_path):
     files = [F("/x/a.mp3"), F("/x/b.m4b"), F("/x/c.m4a"), F("/x/d.MP3"),
              F("/x/e.flac")]
     assert [f.path for f in needs_conversion(files)] == ["/x/a.mp3", "/x/d.MP3"]
+
+
+def test_decoding_reports_position_and_still_returns_every_sample(tmp_path):
+    """Streaming the ffmpeg pipe must not cost a single sample."""
+    from jisho_subs.convert import have_ffmpeg
+    if not have_ffmpeg():
+        return
+    from jisho_subs.audio import decode, decoded_seconds
+
+    src = _make_mp3(tmp_path / "tone.mp3", seconds=3)
+    seen = []
+    samples = decode(src, on_seconds=seen.append)
+    assert decoded_seconds(samples) >= 2.9
+    assert seen and seen == sorted(seen)
+    assert seen[-1] == decoded_seconds(samples), "the last report is the whole file"
+    assert (decode(src) == samples).all(), "same samples with and without a callback"
+
+
+def test_a_failed_decode_still_raises_with_ffmpeg_s_own_message(tmp_path):
+    import subprocess
+    from jisho_subs.convert import have_ffmpeg
+    if not have_ffmpeg():
+        return
+    from jisho_subs.audio import decode
+
+    broken = tmp_path / "broken.mp3"
+    broken.write_bytes(b"not audio at all")
+    try:
+        decode(str(broken))
+    except subprocess.CalledProcessError as exc:
+        assert exc.stderr, "the reason must survive the streamed read"
+    else:
+        raise AssertionError("a broken file must not decode quietly")
 
 
 def test_conversion_produces_a_seekable_m4b_and_keeps_the_original(tmp_path):

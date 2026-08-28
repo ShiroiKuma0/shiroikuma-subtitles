@@ -9,6 +9,9 @@ So: a single line, rewritten in place, naming the file being worked on and
 carrying enough numbers to predict the finish.  When output is not a terminal —
 a log file, a pipe — it degrades to one plain line at intervals, because
 carriage returns in a log are worse than useless.
+
+The counter counts *items*, which is the right unit for a hundred and eleven
+MP3s and no unit at all for one M4B holding the whole book — see ``within()``.
 """
 
 from __future__ import annotations
@@ -26,6 +29,8 @@ BLOCKS = "▏▎▍▌▋▊▉█"
 _MIN_NAME = 14
 #: Columns kept for the bar before the filename is allowed to claim space.
 _BAR_RESERVE = 16
+#: Sparsest stats line the layout will fall back to — counter only.
+_LAST_TIER = 4
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -100,6 +105,13 @@ class Progress:
         self.rate_unit = rate_unit
         self.done = 0
         self.weight = 0.0          # e.g. audio seconds completed
+        #: Position inside the item in flight — see within().  Held apart from
+        #: `done` and `weight` so the counter never claims a file that is still
+        #: running, while the bar, the estimate and the throughput can.
+        self._partial = 0.0
+        self._partial_weight = 0.0
+        self._position = ""
+        self._phase = ""
         self.started = time.time()
         self._last_draw = 0.0
         self._last_line_len = 0
@@ -120,24 +132,40 @@ class Progress:
         What matters most is which file is being worked on — that is the whole
         point of the line — so it is placed before the bar, and the numbers are
         abbreviated rather than the filename dropped.  On a narrow terminal the
-        line degrades in this order: speed, elapsed, bar, time-left.
+        line degrades in this order: speed, elapsed, position, bar, time-left
+        — except that a stage with a single item drops the unchanging filename
+        first, since there the position is the only thing that moves.
         """
-        frac = self.done / self.total
+        units = self.done + self._partial
+        frac = units / self.total
         elapsed = time.time() - self.started
-        rate = self.done / elapsed if elapsed > 0 else 0
-        remaining = (self.total - self.done) / rate if rate > 0 else float("inf")
+        pace = units / elapsed if elapsed > 0 else 0
+        remaining = (self.total - units) / pace if pace > 0 else float("inf")
         speed = ""
-        if self.weight and elapsed > 0:
-            rate = self.weight / elapsed
+        weight = self.weight + self._partial_weight
+        if weight and elapsed > 0:
+            rate = weight / elapsed
             speed = (_mb(rate) if self.rate_unit == "MB/s" else f"{rate:.0f}×")
 
         head = f"{self.tag}{self.label}"
         head_len = len(self.label) + len(_strip_ansi(self.tag))
-        counts = f"{frac * 100:3.0f}% · {self.done}/{self.total}"
+        # "1/1" carries no information; with a single item the position inside
+        # it is the whole of what there is to say.
+        counts = f"{frac * 100:3.0f}%"
+        if self.total > 1:
+            counts += f" · {self.done}/{self.total}"
+        # …and for the same reason the one file's name is not news either: it
+        # is the same name for the whole stage, while the position is the only
+        # thing that moves.  So there the position outlives every other field,
+        # and the name goes when the line finally runs out of room.  With many
+        # files the reverse holds, and the position gives way first.
+        keep_position = self.total == 1 and bool(self._position)
 
-        for tier in range(4):
+        for tier in range(_LAST_TIER + 1):
             parts = [counts]
-            if tier <= 2:
+            if self._position and (keep_position or tier <= 2):
+                parts.append(self._position)
+            if tier <= 3 and pace > 0:
                 parts.append(f"{_hms(remaining)} left")
             if tier <= 1:
                 parts.append(f"{_hms(elapsed)} elapsed")
@@ -155,19 +183,25 @@ class Progress:
                 if want >= _MIN_NAME + 3:
                     name = " · " + shorten(detail, want - 3)
                     room -= len(name)
-                elif tier < 3:
+                elif tier < _LAST_TIER:
                     # Rather than drop the filename, spend a less detailed
                     # stats line on it — knowing which file is running beats
                     # knowing the elapsed time to the second.
                     continue
             bar_width = min(30, room - 2)
             if bar_width < 6:
-                if tier < 3:
+                if tier < _LAST_TIER:
                     continue
                 return f"{head} {stats}{name}"
             return f"{head} ▕{_bar(frac, bar_width)}▏ {stats}{name}"
 
-        return f"{head} {counts}"
+        # Even the bare fallback keeps the position of a single item, as long
+        # as it fits: dropping it leaves a line that never changes again.
+        line = f"{head} {counts}"
+        if keep_position and (head_len + len(counts) + len(self._position)
+                              + 4 <= width):
+            line += f" · {self._position}"
+        return line
 
     def _draw(self, detail: str, force: bool = False) -> None:
         now = time.time()
@@ -183,18 +217,20 @@ class Progress:
 
     def _draw_plain(self, detail: str) -> None:
         """Non-terminal output: a line per decile, never a carriage return."""
-        decile = int(10 * self.done / self.total)
+        decile = int(10 * (self.done + self._partial) / self.total)
         if decile == self._plain_marker and self.done != self.total:
             return
         self._plain_marker = decile
         elapsed = time.time() - self.started
         speed = ""
-        if self.weight and elapsed:
-            rate = self.weight / elapsed
+        weight = self.weight + self._partial_weight
+        if weight and elapsed:
+            rate = weight / elapsed
             speed = (f", {_mb(rate)}" if self.rate_unit == "MB/s"
                      else f", {rate:.0f}x realtime")
+        position = f" {self._position}" if self._position else ""
         self.stream.write(f"{self.tag}{self.label} {self.done}/{self.total}"
-                          f" ({_hms(elapsed)} elapsed{speed})\n")
+                          f"{position} ({_hms(elapsed)} elapsed{speed})\n")
         self.stream.flush()
 
     # -- api -------------------------------------------------------------
@@ -203,8 +239,65 @@ class Progress:
                 weight: float = 0.0) -> None:
         self.done = min(self.total, self.done + amount)
         self.weight += weight
+        # The item is now counted whole; anything within() reported about it
+        # would otherwise be added a second time.
+        self._partial = 0.0
+        self._partial_weight = 0.0
+        self._position = ""
+        self._phase = ""
         if self.enabled:
             self._draw(detail, force=self.done == self.total)
+        else:
+            self._draw_plain(detail)
+
+    def within(self, detail: str, done: Optional[float], total: float,
+               phase: str = "") -> None:
+        """Report position *inside* the item currently being worked on.
+
+        Counting items is the right unit for a hundred and eleven MP3s and no
+        unit at all for one M4B holding the whole book: fourteen hours of
+        «Поколение «М»» is a bar reading `0/1` from the first second to the
+        last — no movement, no throughput, no estimate, and indistinguishable
+        from a hung process, which is how it was read.  Feeding the position in
+        makes the bar, the estimate and the ×realtime figure describe the file,
+        while the counter goes on meaning files finished.
+
+        ``done`` and ``total`` are in the stage's own unit — audio seconds
+        where the rate is ×realtime, bytes where it is MB/s — so the position
+        doubles as the weight covered so far.  It never moves backwards: the
+        batched Whisper pipeline yields a batch at a time, and a bar that
+        retreats reads as a bug.
+
+        A named ``phase`` marks *preparatory* work — decoding the file, finding
+        the speech in it — which is shown but claims none of the bar: it is not
+        the item's own progress, and its speed says nothing about how long the
+        item will take.  Naming it is what keeps a number moving under
+        "transcribing" from being mistaken for transcription.  A phase with no
+        position to report stands on its own.
+        """
+        if done is None or total <= 0:
+            if not phase:
+                return
+            self._position = phase
+        else:
+            pair = (f"{_hms(done)}/{_hms(total)}" if self.rate_unit == "×"
+                    else f"{done / 1e6:.0f}/{total / 1e6:.0f} MB")
+            if phase:
+                self._position = f"{phase} {pair}"
+            else:
+                fraction = min(1.0, max(0.0, done / total))
+                if fraction < self._partial:
+                    return
+                self._partial = fraction
+                self._partial_weight = min(max(0.0, done), total)
+                self._position = pair
+        # A phase can end within the redraw interval of the one before it, and
+        # nothing would redraw it afterwards: decoding finished 40 ms before
+        # Silero started, so the line sat on "decoding" for the whole of the
+        # speech detection.  A change of phase is therefore always drawn.
+        changed, self._phase = phase != self._phase, phase
+        if self.enabled:
+            self._draw(detail, force=changed)
         else:
             self._draw_plain(detail)
 
