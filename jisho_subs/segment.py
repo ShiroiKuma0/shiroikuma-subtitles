@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import functools
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 
 import pysbd
 
+from . import ruby as ruby_mod
+from .ruby import Ruby
 from .source import Block
 
 #: pysbd language codes for the languages we support.
@@ -36,6 +38,11 @@ class Sentence:
     doc: str
     is_heading: bool
     block_index: int
+
+    #: The furigana lying inside this sentence, re-based onto :attr:`text`.
+    #: Empty everywhere except the TTS path, which is the only caller that
+    #: wants the book's own readings — see ``ruby.py``.
+    ruby: List[Ruby] = field(default_factory=list)
 
 
 @functools.lru_cache(maxsize=None)
@@ -106,6 +113,18 @@ def segment(blocks: List[Block], lang: str) -> List[Sentence]:
     out: List[Sentence] = []
     for i, b in enumerate(blocks):
         pieces = [b.text] if b.is_heading else split_block(b.text, lang)
+        # Ruby is positioned in the *block*, so each piece has to be found
+        # again to re-base it.  A piece that cannot be located simply carries
+        # no ruby: _reattach_orphans may have joined two fragments with a
+        # space that was never in the block, and a missing reading is a far
+        # smaller problem than a misplaced one.
+        cursor = 0
         for piece in pieces:
-            out.append(Sentence(piece, b.doc, b.is_heading, i))
+            rubies: List[Ruby] = []
+            if b.ruby:
+                at = b.text.find(piece, cursor)
+                if at >= 0:
+                    rubies = ruby_mod.slice_ruby(b.ruby, at, at + len(piece))
+                    cursor = at + len(piece)
+            out.append(Sentence(piece, b.doc, b.is_heading, i, rubies))
     return out

@@ -27,10 +27,13 @@ import subprocess
 import warnings
 import zipfile
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 from bs4 import BeautifulSoup
+
+from . import ruby as ruby_mod
+from .ruby import Ruby
 
 try:
     from bs4 import XMLParsedAsHTMLWarning
@@ -70,6 +73,10 @@ class Block:
     is_heading: bool
     level: int = 0    #: heading level, 0 for body text
 
+    #: Furigana found in this block, positioned in :attr:`text`.  Populated for
+    #: EPUB only, and read by nothing on the alignment path — see ``ruby.py``.
+    ruby: List[Ruby] = field(default_factory=list)
+
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         kind = f"h{self.level}" if self.is_heading else "p"
         return f"<Block {kind} {self.doc} {self.text[:40]!r}>"
@@ -102,6 +109,9 @@ def _strip_note_markers(soup) -> None:
 def _blocks_from_html(raw: str, doc: str) -> List[Block]:
     # HTML mode, never "lxml-xml" — see the module docstring.
     soup = BeautifulSoup(raw, "lxml")
+    # The readings have to be taken off the tree before <rt> is decomposed;
+    # afterwards they are gone.  This does not put them back into the prose.
+    ruby_mod.stash_readings(soup)
     for tag in DROP_TAGS:
         for el in soup.find_all(tag):
             el.decompose()
@@ -112,12 +122,12 @@ def _blocks_from_html(raw: str, doc: str) -> List[Block]:
     for el in body.find_all(BLOCK_TAGS):
         if el.find(BLOCK_TAGS):
             continue                      # container, not a leaf
-        text = _clean(el.get_text())
+        text, rubies = ruby_mod.rubies_for(el)
         if not text:
             continue
         name = el.name
         out.append(Block(text, doc, name in HEADING_TAGS,
-                         int(name[1]) if name in HEADING_TAGS else 0))
+                         int(name[1]) if name in HEADING_TAGS else 0, rubies))
 
     if not out:                            # document with no block markup
         text = _clean(body.get_text())

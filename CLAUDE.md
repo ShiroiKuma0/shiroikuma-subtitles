@@ -165,6 +165,107 @@ itself) and rewrites. `--realign` runs the full pipeline with the cues as the
 reference text, for an SRT that is actually wrong rather than merely moved.
 This is the difference between a one-hour library run and an eight-hour one.
 
+## Reading a book aloud (`--tts`, VOICEVOX)
+
+**The engine was chosen for its dictionary, not its voice.** VOICEVOX's front
+end is OpenJTalk with a real accent dictionary, so it looks readings up instead
+of inferring them. Measured here against the six words the Sarashina2.2-TTS
+paper reports every end-to-end neural system failing 12–15 times out of 15 —
+好事家 コオズカ, 出納 スイトオ, 生い茂る オイシゲル, 従容 ショオヨオ, 六十路
+ムソジ, 坂路 サカジ — this engine reads all six correctly, and 舳先 ヘサキ with
+them. Any replacement must be held to that test before it is considered.
+
+**Ruby capture is parallel to ruby stripping, never instead of it.** `source.py`
+still decomposes `rt`/`rp`, and `Block.text` must never contain a reading —
+that is what poisons alignment. `ruby.py` stashes the reading on the `<ruby>`
+tag *before* the decomposition and records it as an offset into the cleaned
+text afterwards. Offsets, not a `{word: reading}` map: a map cannot say which
+橋 is はし and which is キョウ. `clean_with_offsets()` mirrors `_clean()` and a
+test asserts they agree; `walk_text()` must equal `get_text()` for the same
+reason. Verified on the corpus: 53,063 annotations captured, zero misplaced.
+
+**Furigana is applied only where the engine disagrees** (`--tts-ruby
+differing`). クリスマス・ピッグ is a children's book with 11,330 usable
+annotations over 150,720 characters, on *ordinary* words. Substituting all of
+them replaces most of the prose with kana, and kana costs OpenJTalk the word
+identity it derives accent from — flat, mis-accented speech in exchange for
+corrections that were not needed. Measured: 0 of 2 applied on 1Q84, 12 of 13 on
+葉隠, where 之 = の, 而 = て and 可成候間、堅火中可仕由 becomes
+なるべく候間、かたく火中つかまつるべき由. The probe is per distinct word and in
+isolation — 41,635 annotations over far fewer words — so a word whose isolated
+reading differs but whose in-context reading was right gets corrected
+unnecessarily. That is the safe direction: the correction is the book's own.
+
+**One sentence per request is what makes the cues exact.** A cue's start is the
+audio written before it; its end is that plus the clip. No Whisper, no VAD, no
+interpolation. Two independent checks: `/audio_query`'s per-mora lengths imply a
+duration matching the synthesised WAV to 0.0 ms, and the last cue of each track
+ends exactly at the encoded M4B's duration, also 0.0 ms, on all three tracks of
+the first book. **Note this contradicts the MP3→M4B note above**: a *re-encode*
+from WAV to AAC drifted by nothing measurable, because ffmpeg's edit list
+compensates. Do not generalise either result to the other path.
+
+**The engine is a child process on purpose.** A server started in one process
+is not necessarily reachable from another, and the tool must not be breakable by
+being invoked without one running — the same reasoning as `cuda.py`. An engine
+already answering is used as it stands. Two traps: the engine writes its user
+dictionary under `XDG_DATA_HOME` and **exits at startup** if that path is
+read-only, so the supervisor always points it at a directory it owns; and the
+GUI AppImage cannot be mounted without FUSE, so `vv-engine` is extracted (4.2 GB,
+once) into the cache directory instead.
+
+**`open_track()` must not reset the sentence counter.** It did, after the loop
+had already counted the sentence that opens the track, so every track's
+manifest count was one short and a resumed run respoke the last sentence of
+every track into a duplicate. `test_the_manifest_covers_every_sentence_exactly_once`
+is that bug.
+
+**A killed run is cleaned up on the way in, not on the way out.** SIGTERM does
+not unwind Python, so the `finally` never runs and the half-written track stays
+behind under a track's name with no SRT — which the app would list as a chapter
+and play the fraction of. `sweep_partials()` sets aside any WAV the manifest
+does not account for. It is moved to `.partial`, never deleted.
+
+**A chapter is not a spine document, and neither signal works alone.** One M4B
+per chapter is the default, and `plan_chapters()` decides where they start
+*before* anything is synthesised. Measured across the corpus: 1Q84 BOOK1 (28
+docs) and クリスマス・ピッグ (65 docs) carry **no headings at all**, so headings
+alone would give one track per book; 自省録 is **688 spine documents with a
+median length of thirty characters**, so documents alone would give 688 tracks
+of a few seconds. Headings where the book has them, documents where it does
+not, fits all six books — 1Q84 plans to exactly its true **24** chapters, 自省録
+29, クリスマス・ピッグ 62, 葉隠 42, 人魚のひいさま 1.
+
+Two rules that are not optional. Chapter one always starts at sentence zero, so
+front matter ahead of the first heading joins it — 人魚のひいさま opens with a
+seven-character spine document that shipped as its own track until this was
+added. And **chapter one folds the next chapter into itself** when it is too
+short, because unlike every other chapter it has nothing behind it to merge
+into; without that, `min_chapter_chars` silently does not apply to the one
+chapter most likely to be a half-title.
+
+`--tts-split time` keeps the older duration-driven behaviour (fill the target,
+then run on to the end of the document); it returns `None` from
+`plan_chapters()` because it depends on durations that do not exist yet.
+
+**Default speed is 1.15**, chosen by ear from rendered samples at 1.00 / 1.15 /
+1.30 / 1.45. Note that much of what reads as "slow" is `--tts-gap` between
+sentences rather than the rate, so try the gap before the speed.
+
+Track titles come from the chapter heading when there is one; the *filename*
+stays `Book NNN` so it sorts and pairs with its SRT, since the app finds
+subtitles by identical basename.
+
+**Do not write a TTS test with the same sentence twice.** `srt._prepare` merges
+identical adjacent cues less than 500 ms apart — the app's own contract — so a
+track built from one repeated sentence comes out as a single cue and the test
+measures the merge rather than what it meant to. `_distinct()` in
+`tests/test_tts.py` exists for this.
+
+Throughput measured on 24 CPU cores at `--jobs 12`: **10× realtime**, so the
+457 uncovered hours are about 45 hours of compute. `--tts-gpu` was not
+exercised.
+
 ## Architecture note
 
 There is no chapter matching, and adding it would be a regression. Global

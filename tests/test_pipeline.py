@@ -772,6 +772,61 @@ def test_the_wrapper_help_documents_every_mode():
         assert expected in out, f"the manual no longer mentions {expected!r}"
 
 
+def test_the_short_tts_help_lists_every_tts_option():
+    """`-h tts` exists so the options need not be hunted for; if a new flag
+    lands only in the full manual, hunting is exactly what it costs."""
+    import subprocess
+    from jisho_subs.cli import build_parser
+
+    out = subprocess.run(["bash", WRAPPER, "-h", "tts"], capture_output=True,
+                         text=True, env={**os.environ, "NO_COLOR": "1"}).stdout
+    missing = [f for a in build_parser()._actions for f in a.option_strings
+               if f.startswith("--tts") and f not in out]
+    assert not missing, f"not in `-h tts`: {missing}"
+
+
+def test_the_short_tts_help_is_actually_short():
+    import subprocess
+
+    env = {**os.environ, "NO_COLOR": "1"}
+    short = subprocess.run(["bash", WRAPPER, "-h", "tts"],
+                           capture_output=True, text=True, env=env).stdout
+    full = subprocess.run(["bash", WRAPPER, "-h"],
+                          capture_output=True, text=True, env=env).stdout
+    assert len(short.splitlines()) < len(full.splitlines()) / 5
+    assert "MP3 CONVERSION" not in short, "it is showing the whole manual again"
+    assert "--tts-speed" in short
+
+
+def test_tts_help_is_reachable_both_ways():
+    import subprocess
+
+    env = {**os.environ, "NO_COLOR": "1"}
+    a = subprocess.run(["bash", WRAPPER, "-h", "tts"],
+                       capture_output=True, text=True, env=env).stdout
+    b = subprocess.run(["bash", WRAPPER, "--tts-help"],
+                       capture_output=True, text=True, env=env).stdout
+    assert a == b and "--tts-voices" in a
+
+
+def test_the_short_tts_help_states_the_actual_defaults():
+    """The voice and the speed are the two things asked about first, and a
+    default documented as a different value is worse than none."""
+    import subprocess
+    from jisho_subs.cli import build_parser
+    from jisho_subs.tts import TtsOptions
+
+    out = subprocess.run(["bash", WRAPPER, "-h", "tts"], capture_output=True,
+                         text=True, env={**os.environ, "NO_COLOR": "1"}).stdout
+    assert str(TtsOptions().speaker) in out, "the default voice id is not shown"
+    assert str(TtsOptions().speed) in out, "the default speed is not shown"
+
+    # And the code's own defaults must agree with the parser's.
+    args = build_parser().parse_args(["--tts"])
+    assert args.tts_speed == TtsOptions().speed
+    assert args.tts_split == TtsOptions().split
+
+
 def test_the_wrapper_reports_a_missing_venv_rather_than_crashing(tmp_path):
     """Pointed at a path with no venv, `run` must explain, not traceback."""
     import subprocess

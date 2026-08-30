@@ -363,6 +363,106 @@ def cmd_sentences(args) -> int:
     return 0
 
 
+def _resolve_speaker(engine, want) -> int:
+    """Accept a style id, or any unambiguous part of a voice's name."""
+    styles = engine.styles()
+    try:
+        wanted = int(want)
+    except (TypeError, ValueError):
+        pass
+    else:
+        if any(st.id == wanted for st in styles):
+            return wanted
+        die(f"no VOICEVOX voice with id {wanted} — try --tts-voices")
+    hits = [st for st in styles if want in st.label]
+    if not hits:
+        die(f"no VOICEVOX voice matching {want!r} — try --tts-voices")
+    if len(hits) > 1 and not any(st.name == want for st in hits):
+        names = ", ".join(f"{st.label} (#{st.id})" for st in hits[:6])
+        die(f"{want!r} matches several voices: {names}")
+    return hits[0].id
+
+
+def cmd_tts(args) -> int:
+    """Read a book aloud instead of aligning it to a recording."""
+    from .source import load_source, book_metadata
+    from .segment import segment
+    from .progress import Progress
+    from . import voicevox, tts as tts_mod
+
+    if args.tts_voices:
+        with voicevox.running_engine(engine_path=args.tts_engine, url=args.tts_url,
+                                     cache_dir=args.cache_dir, log=log) as engine:
+            for st in engine.styles():
+                print(f"{st.id:5d}  {st.label}")
+        return 0
+
+    source = _resolve_reference_only(args)
+    lang = _resolve_language(args, source)
+    meta = book_metadata(source)
+    stem = os.path.splitext(os.path.basename(source))[0].split(" -- ")[0].strip()
+
+    out_dir = args.out or os.path.join(os.path.dirname(os.path.abspath(source)),
+                                       f"{stem} (VOICEVOX)")
+    blocks = load_source(source)
+    sentences = segment(blocks, lang)
+    ruby_count = sum(len(s.ruby) for s in sentences)
+    chars = sum(len(s.text) for s in sentences)
+    step(f"{len(sentences)} sentences, {chars:,} characters, "
+         f"{ruby_count:,} furigana readings")
+
+
+    opts = tts_mod.TtsOptions(
+        speed=args.tts_speed, gap=args.tts_gap,
+        paragraph_gap=max(args.tts_gap, args.tts_gap * 2.2),
+        split=args.tts_split, track_seconds=args.tts_track_minutes * 60.0,
+        min_chapter_chars=args.tts_min_chapter,
+        ruby=args.tts_ruby, fmt=args.tts_format,
+        jobs=args.jobs or 4, language=lang)
+
+    chapters = tts_mod.plan_chapters(sentences, opts)
+    if chapters is not None:
+        titled = sum(1 for c in chapters if c.title)
+        step(f"{len(chapters)} tracks by {args.tts_split}"
+             + (f", {titled} titled from their headings" if titled else ""))
+
+    if args.dry_run:
+        log(f"would read it aloud into {out_dir}")
+        log(f"  voice {args.tts_speaker}, ruby {args.tts_ruby}, "
+            f"speed {args.tts_speed:g}, {args.tts_format}")
+        log(f"  roughly {chars / 400 / 60:.1f} hours of audio")
+        return 0
+
+    with voicevox.running_engine(engine_path=args.tts_engine, url=args.tts_url,
+                                 use_gpu=args.tts_gpu, threads=args.jobs,
+                                 cache_dir=args.cache_dir, log=log) as engine:
+        opts.speaker = _resolve_speaker(engine, args.tts_speaker)
+        style = next((st for st in engine.styles() if st.id == opts.speaker), None)
+        step(f"reading it as {style.label if style else opts.speaker} "
+             f"into {out_dir}")
+        bar = Progress(len(sentences), "speaking", rate_unit="×")
+        try:
+            stats = tts_mod.speak_book(engine, sentences, out_dir, stem, opts,
+                                       meta=meta, log=log, progress=bar,
+                                       force=args.force)
+        finally:
+            bar.close()
+
+    log()
+    step(f"{stats.tracks} tracks, {stats.hours:.2f} hours of audio, "
+         f"{stats.sentences} cues")
+    if stats.skipped_tracks:
+        log(f"  {stats.skipped_tracks} track(s) were already done and were kept")
+    if stats.ruby_seen:
+        log(f"  furigana: {stats.ruby_applied:,} applied, "
+            f"{stats.ruby_agreed:,} already read correctly by the engine")
+    for text, err in stats.failures[:10]:
+        log(f"  {C.WARN}not spoken{C.RESET} {text!r}: {err}")
+    if len(stats.failures) > 10:
+        log(f"  ... and {len(stats.failures) - 10} more")
+    return 1 if stats.failures and not stats.sentences else 0
+
+
 def cmd_convert(args) -> int:
     from .convert import convert, have_ffmpeg, needs_conversion, target_dir
 
@@ -876,6 +976,9 @@ examples:
                            help="show what would be used, and do nothing")
     exclusive.add_argument("--lint", action="store_true",
                            help="check SRTs against the app's parser")
+    exclusive.add_argument("--tts", action="store_true",
+                           help="read the book aloud with VOICEVOX instead of "
+                                "aligning it to a recording")
 
     where = p.add_argument_group("what to work on")
     where.add_argument("--dir", dest="directory_opt",
@@ -918,6 +1021,41 @@ examples:
     subs.add_argument("--beam-size", type=int, default=1)
     subs.add_argument("--cache-dir", metavar="DIR")
 
+    speech = p.add_argument_group("text-to-speech (--tts)")
+    speech.add_argument("--tts-voices", action="store_true",
+                        help="list the available VOICEVOX voices and stop")
+    speech.add_argument("--tts-speaker", default="読み聞かせ", metavar="VOICE",
+                        help="voice id or name "
+                             "(default: 31 — No.7 / 読み聞かせ)")
+    speech.add_argument("--tts-ruby", default="differing",
+                        choices=("differing", "always", "never"),
+                        help="when to let the book's furigana override the "
+                             "engine (default: differing)")
+    speech.add_argument("--tts-speed", type=float, default=1.15, metavar="X",
+                        help="speaking rate (default: 1.15)")
+    speech.add_argument("--tts-split", default="chapter",
+                        choices=("chapter", "document", "time"),
+                        help="what makes a track: one per chapter (default), "
+                             "one per spine document, or fill a time target")
+    speech.add_argument("--tts-min-chapter", type=int, default=400,
+                        metavar="CHARS",
+                        help="a chapter shorter than this joins the one before "
+                             "it (default: 400)")
+    speech.add_argument("--tts-gap", type=float, default=0.25, metavar="SECONDS",
+                        help="silence between sentences (default: 0.25)")
+    speech.add_argument("--tts-track-minutes", type=float, default=30.0,
+                        metavar="N",
+                        help="target track length for --tts-split time "
+                             "(default: 30)")
+    speech.add_argument("--tts-format", default="m4b", choices=("m4b", "wav"),
+                        help="output format (default: m4b)")
+    speech.add_argument("--tts-engine", metavar="DIR",
+                        help="path to an unpacked vv-engine directory")
+    speech.add_argument("--tts-url", metavar="URL",
+                        help="use an engine already running here")
+    speech.add_argument("--tts-gpu", action="store_true",
+                        help="synthesise on the GPU")
+
     run = p.add_argument_group("how to run")
     run.add_argument("-n", "--dry-run", action="store_true",
                      help="plan only: convert nothing, delete nothing, write nothing")
@@ -957,6 +1095,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         if args.lint:
             return cmd_lint(args)
+        if args.tts or args.tts_voices:
+            return cmd_tts(args)
         if args.sentences:
             return cmd_sentences(args)
         if args.probe:

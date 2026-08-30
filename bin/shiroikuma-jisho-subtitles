@@ -122,6 +122,72 @@ ${C}WHAT IT DROPS BY ITSELF${R}
       ${D}·${R} a whole audio file containing no book text — a publisher intro
         track — which produces no SRT and is reported as such
 
+${C}READING A BOOK ALOUD${R}  ${C}(--tts)${R}
+    Some books have no audiobook.  For those, this synthesises one — and
+    because it synthesises ${B}one sentence per request${R}, it already knows where
+    every sentence falls.  A cue's start is how much audio came before it and
+    its end is that plus the length of the clip.  There is no transcription
+    here, no voice-activity detection and no interpolation: the timings are
+    ${B}exact by construction${R}, not recovered.
+
+    ${B}Why VOICEVOX and not a paid service.${R}  Its front end is OpenJTalk with a
+    real accent dictionary, so it ${B}looks readings up${R} rather than inferring them
+    from the kanji.  Against the six words a 2026 benchmark reports every
+    end-to-end neural system failing twelve to fifteen times out of fifteen —
+    ${D}好事家 出納 生い茂る 従容 六十路 坂路${R} — this engine reads all six correctly.
+    A pleasanter voice that says the wrong word is worse than useless for
+    study, because it teaches the wrong word convincingly.  It is also free,
+    runs on this machine, and sends no book to anyone.
+
+    ${B}The book's own furigana is used.${R}  Japanese EPUBs carry readings the
+    publisher put there for exactly the words a dictionary gets wrong — 41,635
+    of them in 葉隠, 11,330 in クリスマス・ピッグ.  The alignment path throws
+    them away, correctly; this path keeps them, positioned on the characters
+    they annotate, because a ${C}word: reading${R} map cannot say which 橋 is はし
+    and which is キョウ.
+
+    They are applied ${B}only where the engine disagrees${R}.  クリスマス・ピッグ is a
+    children's book that annotates ordinary words; substituting all of those
+    would replace most of the prose with kana, and kana costs OpenJTalk the
+    word identity it takes its accent from — flat, mis-accented speech in
+    exchange for corrections that were not needed.  So the engine is asked
+    first.  On 1Q84 that applies almost none of them.  On 葉隠, which is
+    classical, it applies nearly all: ${D}之${R} is ${D}の${R} and not ${D}これ${R}, ${D}而${R} is ${D}て${R}
+    and not ${D}しか${R}, and ${D}可成候間、堅火中可仕由${R} is spoken as
+    ${D}なるべく候間、かたく火中つかまつるべき由${R}.
+
+    ${B}One M4B per chapter${R}, titled with the chapter's own heading where the book
+    has one.  ${B}A chapter is not a spine document${R}, and neither signal works
+    alone — measured across the corpus, ${D}1Q84 BOOK1${R} and ${D}クリスマス・ピッグ${R}
+    carry ${B}no headings at all${R}, while ${D}自省録${R} is 688 spine documents with a
+    median length of ${B}thirty characters${R}.  So headings are used where the book
+    has them and documents where it does not, which gives 1Q84 its true 24
+    chapters, 自省録 29, クリスマス・ピッグ 62 and 葉隠 42.
+
+    Chapter one always starts at sentence zero, so front matter ahead of the
+    first heading joins it rather than shipping as its own track, and anything
+    below ${C}--tts-min-chapter${R} folds into the chapter before it.  ${C}--tts-split
+    document${R} takes the spine at its word; ${C}--tts-split time${R} is the older
+    behaviour, filling ${C}--tts-track-minutes${R} and then running on to the end of
+    the document.
+
+    ${B}A run resumes.${R}  Each finished track is written with its SRT and recorded,
+    so an interrupted book carries on from the next unspoken sentence rather
+    than starting again — which matters when the book is 葉隠 and the read is
+    forty-seven hours.  Changing the voice, the speed or the ruby policy
+    invalidates that and starts the book again, because the old tracks no
+    longer match.  A track left half-written by a run that was killed is moved
+    aside as ${C}.partial${R} rather than deleted.
+
+    The engine is started as a child process and stopped afterwards; one
+    already answering is used as it stands.  It is found inside the VOICEVOX
+    AppImage and unpacked once, into the cache directory.
+
+    ${M}The voice is the compromise.${R}  VOICEVOX calls its own output 中品質 and its
+    cast is built for characters, not narration; ${C}--tts-voices${R} lists what is
+    there, and ${D}No.7 / 読み聞かせ${R} is the default because it is the one style
+    built for reading aloud.  Listen to a chapter before committing a book.
+
 ${C}MP3 CONVERSION${R}
     The app cannot seek MP3.  Its own warning says the Android player lands
     several seconds from the requested position and that ${B}auto-pause fires at
@@ -248,7 +314,11 @@ ${C}OPTIONS${R}
     ${C}--sentences${R}           print the reference text as it will be cued
     ${C}--probe${R}               show what would be used, and do nothing
     ${C}--lint${R}                check SRTs against the app's parser
-    ${D}These four are mutually exclusive.${R}
+    ${C}--tts${R}                 read the book aloud with VOICEVOX, for a book
+                          that has no audiobook.  ${D}Voice ${R}${C}31${R}${D} (No.7 / 読み聞かせ),
+                          speed ${R}${C}1.15${R}${D}, one M4B per chapter${R} — see READING A
+                          BOOK ALOUD
+    ${D}These five are mutually exclusive.${R}
 
   ${B}The pipeline${R}
     ${C}-n, --dry-run${R}         plan only.  Converts nothing, deletes nothing,
@@ -289,8 +359,37 @@ ${C}OPTIONS${R}
                           only way to correct a book whose source MP3s have
                           already been deleted
 
+  ${B}Reading a book aloud${R} ${D}(--tts)${R}
+    ${C}--tts-voices${R}          list the available voices and stop
+    ${C}--tts-speaker${R} VOICE   voice id, or any unambiguous part of its name.
+                          ${D}Default ${R}${C}31${R}${D} — No.7 / 読み聞かせ, the one style in the
+                          cast built for reading aloud.  ${R}${C}--tts-voices${R}${D} lists
+                          the other ~120.${R}
+    ${C}--tts-ruby${R} WHEN       when the book's furigana overrides the engine:
+                          ${C}differing${R} only where the engine reads it another
+                          way ${D}(default)${R}, ${C}always${R}, or ${C}never${R}
+    ${C}--tts-speed${R} X         speaking rate ${D}(default: 1.15)${R}
+    ${C}--tts-split${R} WHAT      what makes one M4B: ${C}chapter${R} ${D}(default)${R},
+                          ${C}document${R} one per spine file, or ${C}time${R} to fill
+                          ${C}--tts-track-minutes${R}
+    ${C}--tts-min-chapter${R} CHARS
+                          a chapter shorter than this joins the one before it
+                          ${D}(default: 400 — about a minute of speech)${R}
+    ${C}--tts-gap${R} SECONDS     silence between sentences ${D}(default: 0.25;${R}
+                          ${D}paragraph and heading breaks get more)${R}
+    ${C}--tts-track-minutes${R} N  target length for ${C}--tts-split time${R} ${D}(default: 30)${R}
+    ${C}--tts-format${R} m4b|wav  ${D}(default: m4b — the app cannot seek anything else
+                          reliably, and WAV is for checking the raw output)${R}
+    ${C}--tts-engine${R} DIR      an unpacked vv-engine directory, if the engine is
+                          not where this expects to find it
+    ${C}--tts-url${R} URL         use an engine already running here, instead of
+                          starting one
+    ${C}--tts-gpu${R}             synthesise on the GPU
+    ${D}--jobs, -o, --epub, -l, --cache-dir, -n and --force apply here too.${R}
+
   ${B}Anywhere${R}
     ${C}-h, --help${R}            this manual
+    ${C}-h tts${R}, ${C}--tts-help${R}    just the text-to-speech part of it
     ${C}--version${R}             print the version
     ${C}-s, --setup${R}           set this machine up, or check it — see
                           SETTING UP A MACHINE
@@ -385,6 +484,23 @@ ${C}EXIT STATUS${R}
 ${C}SEE ALSO${R}
     ${D}${REPO}/README.md${R}
 EOF
+}
+
+# `-h tts` — the text-to-speech options alone, so they need not be hunted for
+# in the full manual.  The list is *extracted* from print_help rather than
+# written out again, so a new flag cannot appear in one and not the other.
+print_tts_help() {
+    printf '%s%s --tts%s — read a book aloud with VOICEVOX\n' "$Y" "$PROG" "$R"
+    printf '  %sDefaults:%s voice %s31 — No.7 / 読み聞かせ%s   speed %s1.15%s   %sone M4B per chapter%s\n' \
+        "$B" "$R" "$C" "$R" "$C" "$R" "$C" "$R"
+    print_help | awk '
+        { line = $0; plain = $0; gsub(/\033\[[0-9;]*m/, "", plain) }
+        plain ~ /^  Reading a book aloud/ { opts = 1; print ""; next }
+        opts && plain ~ /^  [A-Za-z]/     { opts = 0 }
+        opts                              { print line }
+    '
+    printf '  %sWhy it works the way it does: %s -h%s, section READING A BOOK ALOUD%s\n' \
+        "$D" "$PROG" "$C" "$R"
 }
 
 # ---------------------------------------------------------------- setup ----
@@ -657,7 +773,15 @@ do_setup() {
 
 case "${1:-}" in
     -h|--help|help|"")
-        print_help
+        if [[ "${2:-}" == "tts" || "${2:-}" == "--tts" ]]; then
+            print_tts_help
+        else
+            print_help
+        fi
+        exit 0
+        ;;
+    --tts-help)
+        print_tts_help
         exit 0
         ;;
     -s|--setup)
