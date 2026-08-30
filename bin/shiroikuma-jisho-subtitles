@@ -188,6 +188,29 @@ ${C}READING A BOOK ALOUD${R}  ${C}(--tts)${R}
     there, and ${D}No.7 / 読み聞かせ${R} is the default because it is the one style
     built for reading aloud.  Listen to a chapter before committing a book.
 
+  ${B}Producing the M4B${R}
+    ${D}A folder holding the EPUB.  Output lands beside it, in BOOK (VOICEVOX)/${R}
+      ${G}${PROG} --tts BOOKDIR${R}
+
+    ${D}One EPUB by name, output where you say${R}
+      ${G}${PROG} --tts --epub BOOK.epub -o OUTDIR${R}
+      ${G}${PROG} --tts BOOK.epub -o OUTDIR${R}
+
+    ${D}See the plan — chapters, hours, voice — without synthesising anything${R}
+      ${G}${PROG} --tts -n --epub BOOK.epub${R}
+
+    ${D}Hear the voices first, then pick one${R}
+      ${G}${PROG} --tts-voices${R}
+      ${G}${PROG} --tts --epub BOOK.epub --tts-speaker 13${R}
+
+    Each run writes ${B}one M4B and one matching SRT per chapter${R}, plus a small
+    ${C}.jisho-tts.json${R}, and may be interrupted and started again.
+
+    ${M}Without ${C}--tts${M} none of this happens${R} — a bare
+    ${D}${PROG} BOOK.epub${R}
+    runs the alignment pipeline, which needs an audiobook.  It says so, and
+    names the command above.
+
 ${C}MP3 CONVERSION${R}
     The app cannot seek MP3.  Its own warning says the Android player lands
     several seconds from the requested position and that ${B}auto-pause fires at
@@ -493,14 +516,25 @@ print_tts_help() {
     printf '%s%s --tts%s — read a book aloud with VOICEVOX\n' "$Y" "$PROG" "$R"
     printf '  %sDefaults:%s voice %s31 — No.7 / 読み聞かせ%s   speed %s1.15%s   %sone M4B per chapter%s\n' \
         "$B" "$R" "$C" "$R" "$C" "$R" "$C" "$R"
+    # Both blocks are lifted out of print_help rather than written a second
+    # time, so a new flag or a changed example cannot reach one and not the
+    # other.  Each ends at the next heading: two spaces and a letter for a
+    # sub-block, none for a section.
     print_help | awk '
         { line = $0; plain = $0; gsub(/\033\[[0-9;]*m/, "", plain) }
-        plain ~ /^  Reading a book aloud/ { opts = 1; print ""; next }
-        opts && plain ~ /^  [A-Za-z]/     { opts = 0 }
-        opts                              { print line }
+        plain ~ /^  Producing the M4B/ { grab = 1; print ""; print line; next }
+        grab && plain ~ /^  [A-Za-z]/  { grab = 0 }
+        grab && plain ~ /^[A-Z]/       { grab = 0 }
+        grab                           { print line }
     '
-    printf '  %sWhy it works the way it does: %s -h%s, section READING A BOOK ALOUD%s\n' \
-        "$D" "$PROG" "$C" "$R"
+    print_help | awk '
+        { line = $0; plain = $0; gsub(/\033\[[0-9;]*m/, "", plain) }
+        plain ~ /^  Reading a book aloud/ { grab = 1; print ""; print line; next }
+        grab && plain ~ /^  [A-Za-z]/     { grab = 0 }
+        grab                              { print line }
+    '
+    printf '  %sWhy it works this way: %s-h%s, section READING A BOOK ALOUD%s\n' \
+        "$D" "$C" "$D" "$R"
 }
 
 # ---------------------------------------------------------------- setup ----

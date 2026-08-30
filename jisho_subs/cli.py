@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 import time
 from typing import List, Optional
@@ -63,6 +64,31 @@ def die(msg: str, code: int = 1):
 
 # -- input resolution ----------------------------------------------------
 
+#: How the tool is invoked, for error messages that name a command to run.
+PROG = "shiroikuma-jisho-subtitles"
+
+
+def _looks_like_a_book_file(path) -> bool:
+    return bool(path) and os.path.isfile(path) \
+        and path.lower().endswith((".epub", ".pdf"))
+
+
+def _no_audio_advice(source: str) -> List[str]:
+    """What to say when there is a book and no recording to align it to.
+
+    Being handed an EPUB on its own is not a mistake — it is the whole reason
+    --tts exists.  Naming the audiobook that is missing, without naming the mode
+    that needs none, sends 白い熊 looking for a file that was never going to be
+    there.  Returned as lines so a die() and a log() can each lay them out.
+    """
+    quoted = shlex.quote(source)
+    return [f"{os.path.basename(source)} has no audiobook beside it.",
+            "Aligning subtitles needs the recording; reading it aloud does not.",
+            "To synthesise it — one M4B and one SRT per chapter:",
+            f"  {PROG} --tts --epub {quoted} -o OUTDIR",
+            f"Add -n to see the plan first.  {PROG} -h tts has the rest."]
+
+
 def _resolve_inputs(args):
     from .source import find_source
     from .audio import discover
@@ -84,13 +110,14 @@ def _resolve_inputs(args):
     if not os.path.exists(source):
         die(f"reference file does not exist: {source}")
     if not audio_root or not os.path.isdir(audio_root):
-        die("no audio directory; pass --audio or -d")
+        die("\n        ".join(_no_audio_advice(source)) if source
+            else "no audio directory; pass --audio or -d")
 
     shadowed: List[str] = []
     files = discover(audio_root, on_shadow=shadowed.extend)
     args._shadowed = shadowed
     if not files:
-        die(f"no audio files under {audio_root}")
+        die("\n        ".join(_no_audio_advice(source)))
     if shadowed:
         # The tool ignores the superseded copies; the app will not.
         log(f"{C.DIM}ignoring {len(shadowed)} superseded file(s) "
@@ -336,8 +363,12 @@ def _resolve_reference_only(args) -> str:
         if not os.path.exists(args.epub):
             die(f"reference file does not exist: {args.epub}")
         return args.epub
+    if _looks_like_a_book_file(args.directory):
+        return args.directory            # --tts BOOK.epub is what people type
     if not args.directory or not os.path.isdir(args.directory):
-        die("pass --epub, or -d pointing at the book directory")
+        die(f"pass an EPUB or the directory holding it, e.g.\n"
+            f"          {PROG} --tts --epub BOOK.epub -o OUTDIR\n"
+            f"          {PROG} --tts BOOKDIR")
     source = find_source(os.path.abspath(args.directory))
     if not source:
         die(f"no EPUB or PDF in {args.directory}")
@@ -345,7 +376,7 @@ def _resolve_reference_only(args) -> str:
 
 
 def cmd_sentences(args) -> int:
-    from .source import load_source
+    from .source import find_source, load_source
     from .segment import segment
 
     source = _resolve_reference_only(args)
@@ -689,7 +720,7 @@ def _run_one_book(args, plan) -> bool:
     from .normalize import proper_nouns
     from .plan import FROM_EPUB, FROM_NOTHING, FROM_SRT
     from .segment import segment
-    from .source import load_source
+    from .source import find_source, load_source
     from .srt import write_for_files
     from . import report as report_mod
 
@@ -698,6 +729,18 @@ def _run_one_book(args, plan) -> bool:
     files = discover(plan.directory, on_shadow=shadowed.extend)
     args._shadowed = shadowed
     if not files:
+        # This used to return False and print nothing at all, so a folder
+        # holding only an EPUB exited 1 in silence — which is the very case
+        # --tts exists for.
+        source = getattr(plan, "source", None) or find_source(plan.directory)
+        if source:
+            log(f"{C.WARN}no audio{C.RESET} in "
+                f"{os.path.basename(plan.directory)}")
+            for line in _no_audio_advice(source):
+                log(f"  {line}")
+        else:
+            log(f"{C.WARN}nothing to work on{C.RESET} in "
+                f"{os.path.basename(plan.directory)}: no audio and no EPUB")
         return False
     lang = _language_for(args, plan, files)
 
@@ -873,6 +916,16 @@ def cmd_run(args) -> int:
         args.directory = args.directory_opt
     root = args.directory or args.audio
     if not root or not os.path.isdir(root):
+        if _looks_like_a_book_file(root):
+            die("\n        ".join([
+                f"{os.path.basename(root)} is a book, not a directory.",
+                "To read it aloud — one M4B and one SRT per chapter, no",
+                "audiobook needed:",
+                f"  {PROG} --tts --epub {shlex.quote(root)} -o OUTDIR",
+                "To align it to a recording you already have, pass the folder",
+                "holding both:",
+                f"  {PROG} BOOKDIR",
+                f"{PROG} -h tts explains the first one."]))
         die("pass a book directory, a library directory, or --epub with --audio")
     root = os.path.abspath(root)
 
@@ -943,7 +996,7 @@ def cmd_run(args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="shiroikuma-jisho-subtitles",
+        prog=PROG,
         description="Turn an EPUB and its audiobook into one-sentence-per-cue "
                     "SRT files for shiroikuma-jisho.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -962,7 +1015,7 @@ examples:
                    help="a book directory, a directory of them, or (with "
                         "--lint) SRT files")
     p.add_argument("--version", action="version",
-                   version=f"shiroikuma-jisho-subtitles {__version__}")
+                   version=f"{PROG} {__version__}")
 
     # What to do.  All options; there are no bare-word subcommands.
     mode = p.add_argument_group("what to do (default: the whole pipeline)")

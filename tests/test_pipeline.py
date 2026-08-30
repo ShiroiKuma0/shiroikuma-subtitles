@@ -827,6 +827,49 @@ def test_the_short_tts_help_states_the_actual_defaults():
     assert args.tts_split == TtsOptions().split
 
 
+def test_the_short_tts_help_shows_how_to_actually_produce_the_m4b():
+    """Knowing every flag is not knowing the command to type."""
+    import subprocess
+
+    out = subprocess.run(["bash", WRAPPER, "-h", "tts"], capture_output=True,
+                         text=True, env={**os.environ, "NO_COLOR": "1"}).stdout
+    assert "Producing the M4B" in out
+    assert "--tts --epub BOOK.epub -o OUTDIR" in out
+    assert "--tts BOOKDIR" in out
+    assert "--tts-voices" in out
+
+
+def test_a_bare_epub_is_told_how_to_synthesise_it(tmp_path):
+    """`… name.epub` used to say only that it wanted a directory, sending you
+    looking for an audiobook that was never going to be there."""
+    import subprocess
+    import sys
+
+    book = tmp_path / "name.epub"
+    book.write_bytes(b"not really an epub")
+    r = subprocess.run([sys.executable, "-m", "jisho_subs", str(book)],
+                       capture_output=True, text=True,
+                       cwd=os.path.dirname(WRAPPER),
+                       env={**os.environ, "NO_COLOR": "1"})
+    assert r.returncode != 0
+    assert "--tts" in r.stderr, "it does not mention the mode that needs no audio"
+    assert "--epub" in r.stderr
+    assert "-h tts" in r.stderr
+
+
+def test_a_book_with_no_audio_is_told_what_to_do_instead():
+    """It used to return False and print nothing at all, exiting 1 in silence."""
+    from jisho_subs.cli import _no_audio_advice
+
+    lines = _no_audio_advice("/books/Ningyo no Hiisama.epub")
+    joined = " ".join(lines)
+    assert "Ningyo no Hiisama.epub" in joined
+    assert "--tts --epub" in joined
+    # A path with spaces has to come back as something runnable.
+    quoted = " ".join(_no_audio_advice("/books/a b.epub"))
+    assert "'/books/a b.epub'" in quoted
+
+
 def test_the_wrapper_reports_a_missing_venv_rather_than_crashing(tmp_path):
     """Pointed at a path with no venv, `run` must explain, not traceback."""
     import subprocess
