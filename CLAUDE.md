@@ -262,9 +262,56 @@ track built from one repeated sentence comes out as a single cue and the test
 measures the merge rather than what it meant to. `_distinct()` in
 `tests/test_tts.py` exists for this.
 
-Throughput measured on 24 CPU cores at `--jobs 12`: **10× realtime**, so the
-457 uncovered hours are about 45 hours of compute. `--tts-gpu` was not
-exercised.
+**The GPU is tried, verified, and fallen back from.** `--tts-gpu` is now the
+default, but requesting it is not enough: the failure mode is a **500 from
+`/synthesis` while `/version` and `/audio_query` answer perfectly**, because the
+model loads and the OpenJTalk front end runs and only the neural decode fails.
+So `_gpu_works()` synthesises one utterance at startup — eight seconds to learn
+it, rather than four hundred sentences.
+
+**On this machine the GPU cannot work, and no configuration fixes it.** The
+bundled ONNX Runtime's CUDA provider carries kernels for **sm_30, 70, 75, 80,
+86, 89** and no forward-compilable PTX; the RTX 5090 is **sm_120**. Swapping in
+the venv's cuDNN 9.24 does nothing — the provider links `libcudnn.so.8`, and
+there are no kernels to run regardless. VOICEVOX CORE 0.17.0 (2026-08-13) moved
+to ONNX Runtime 1.23.2, which is where Blackwell support arrives, but **no
+VOICEVOX engine release carries it yet** (latest engine 0.25.2, 2026-04-30).
+Re-check that before concluding the GPU is broken again.
+
+**A wedged engine is replaced, never waited on.** Measured failure, not a
+hypothetical: on オバアチャンノゴメンネリスト (8,460 sentences) the engine stopped
+answering four in-flight `/synthesis` calls after 1,214 sentences. It stayed
+*healthy* — `/version` in 5 ms, zero CPU — while those four sockets sat
+`ESTAB` with empty queues both ways, the workers blocked in `recv`, the main
+thread in `futex_do_wait`, and the run hung 35 minutes until killed. Three
+things came out of it, and all three matter:
+
+* `Engine` now has a finite timeout (120 s) and retries transport errors on a
+  **fresh request**, since the URL moves when the engine is replaced. An HTTP
+  4xx/5xx is *not* retried — it is the engine's considered answer, and that is
+  how the GPU probe learns the GPU cannot synthesise.
+* `render_stream` drains with `future.result(timeout=stall_seconds)` and, on
+  timeout, calls `engine.restart_backend()`. **Replacing the engine process is
+  the only thing that makes a wedged socket read fail**; nothing in the client
+  can break it from this side.
+* The pool is shut down with `wait=False, cancel_futures=True`. With
+  `wait=True` — which `with ThreadPoolExecutor(...)` does — the exit blocks on
+  the stuck worker, which is why Ctrl-C did nothing and the run needed
+  `kill -9`.
+
+**`--jobs` defaults to one per core** (`TtsOptions.jobs = 0` means auto) and is
+no longer passed to the engine as `--cpu_num_threads`: it meant two different
+things at once, so 24 workers each asked the engine for 24 threads.
+
+**The hours estimate is per language, and measured.** `CHARS_PER_MINUTE` comes
+from 白い熊's own recordings beside their EPUBs — Japanese 1Q84 270,
+クリスマス・ピッグ 308, 自省録 341; German Der Vorleser 853, Genealogie der Moral
+680. The single hardcoded `chars / 400` was wrong for both, in opposite
+directions: it understated Japanese by a quarter and overstated German by more
+than half.
+
+Throughput measured on 24 CPU cores: **9.6× realtime single-stream**, ~10× at
+`--jobs 12`.
 
 ## Architecture note
 

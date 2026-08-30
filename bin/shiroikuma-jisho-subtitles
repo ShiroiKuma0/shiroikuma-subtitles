@@ -183,6 +183,29 @@ ${C}READING A BOOK ALOUD${R}  ${C}(--tts)${R}
     already answering is used as it stands.  It is found inside the VOICEVOX
     AppImage and unpacked once, into the cache directory.
 
+    ${B}The GPU is tried first and verified.${R}  Not merely requested — one short
+    utterance is synthesised before the book starts, because the failure mode
+    is a 500 from ${C}/synthesis${R} while ${C}/version${R} and ${C}/audio_query${R} answer
+    perfectly: the model loads, the OpenJTalk front end runs, and only the
+    neural decode fails.  If that probe fails the run drops to the CPU and says
+    so, having spent about eight seconds finding out rather than four hundred
+    sentences.
+
+    ${M}On this machine the GPU does not work yet, and cannot.${R}  The bundled
+    ONNX Runtime carries kernels for ${D}sm_30, 70, 75, 80, 86 and 89${R} only, with
+    no forward-compilable PTX; an RTX 5090 is ${D}sm_120${R}.  No library swap fixes
+    that — there are no kernels to run.  VOICEVOX CORE 0.17.0 (13 Aug 2026)
+    moved to ONNX Runtime 1.23.2, which is where Blackwell support arrives, but
+    no VOICEVOX ${B}engine${R} release carries it yet (latest is 0.25.2, 30 Apr
+    2026).  When one does, this starts using the GPU with no change here.
+
+    ${B}A wedged engine is replaced rather than waited on.${R}  Synthesis can stop
+    answering while the engine stays healthy — on one 8,460-sentence book four
+    in-flight requests went unanswered after 1,214 sentences, on sockets that
+    stayed established and silent, and the run hung for 35 minutes.  Nothing
+    but replacing the engine frees those reads, so that is what happens after
+    ${C}--tts-stall${R} seconds, and the sentence is retried rather than lost.
+
     ${M}The voice is the compromise.${R}  VOICEVOX calls its own output 中品質 and its
     cast is built for characters, not narration; ${C}--tts-voices${R} lists what is
     there, and ${D}No.7 / 読み聞かせ${R} is the default because it is the one style
@@ -401,14 +424,19 @@ ${C}OPTIONS${R}
     ${C}--tts-gap${R} SECONDS     silence between sentences ${D}(default: 0.25;${R}
                           ${D}paragraph and heading breaks get more)${R}
     ${C}--tts-track-minutes${R} N  target length for ${C}--tts-split time${R} ${D}(default: 30)${R}
+    ${C}--tts-stall${R} SECONDS   replace the engine when a sentence goes unanswered
+                          for this long ${D}(default: 300)${R}
     ${C}--tts-format${R} m4b|wav  ${D}(default: m4b — the app cannot seek anything else
                           reliably, and WAV is for checking the raw output)${R}
     ${C}--tts-engine${R} DIR      an unpacked vv-engine directory, if the engine is
                           not where this expects to find it
     ${C}--tts-url${R} URL         use an engine already running here, instead of
                           starting one
-    ${C}--tts-gpu${R}             synthesise on the GPU
-    ${D}--jobs, -o, --epub, -l, --cache-dir, -n and --force apply here too.${R}
+    ${C}--tts-gpu${R}             synthesise on the GPU ${D}(the default)${R}
+    ${C}--tts-no-gpu${R}          do not try the GPU at all
+    ${C}--jobs${R} N              sentences in flight at once ${D}(default: one per
+                          core)${R}
+    ${D}-o, --epub, -l, --cache-dir, -n and --force apply here too.${R}
 
   ${B}Anywhere${R}
     ${C}-h, --help${R}            this manual
@@ -516,6 +544,8 @@ print_tts_help() {
     printf '%s%s --tts%s — read a book aloud with VOICEVOX\n' "$Y" "$PROG" "$R"
     printf '  %sDefaults:%s voice %s31 — No.7 / 読み聞かせ%s   speed %s1.15%s   %sone M4B per chapter%s\n' \
         "$B" "$R" "$C" "$R" "$C" "$R" "$C" "$R"
+    printf '            %sGPU when it works, else CPU%s   %sone worker per core%s\n' \
+        "$C" "$R" "$C" "$R"
     # Both blocks are lifted out of print_help rather than written a second
     # time, so a new flag or a changed example cannot reach one and not the
     # other.  Each ends at the next heading: two spaces and a letter for a

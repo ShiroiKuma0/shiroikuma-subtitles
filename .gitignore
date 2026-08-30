@@ -6,3 +6,8 @@ dist/
 .venv/
 .scratch/
 .pytest_cache/
+
+# Stray artefacts: a library writes :memory:.ses on import, and research
+# scratch belongs in .scratch/, never the repo root.
+:memory:.ses
+/gpu.py

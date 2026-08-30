@@ -33,6 +33,7 @@ import os
 import shutil
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -158,32 +159,57 @@ class Engine:
     """A thin client over the engine's HTTP API."""
 
     def __init__(self, base_url: str = f"http://127.0.0.1:{DEFAULT_PORT}",
-                 timeout: float = 300.0):
+                 timeout: float = 120.0, retries: int = 3, process=None):
         self.base_url = base_url.rstrip("/")
+        #: Per-request read timeout.  It has to be finite: a wedged engine
+        #: leaves the socket established and silent, and a client with no
+        #: deadline waits on it for as long as the run lasts.
         self.timeout = timeout
+        self.retries = max(1, retries)
+        #: The child process, when this client started one.  Holding it is what
+        #: lets a stalled request be broken by replacing the engine.
+        self.process = process
         self._readings: Dict[tuple, str] = {}
+        self._lock = threading.Lock()
+
+    def restart_backend(self) -> bool:
+        """Replace the engine process, if this client owns one."""
+        if self.process is None:
+            return False
+        self.process.restart()
+        self.base_url = self.process.base_url
+        return True
 
     # -- transport --
 
     def _request(self, path: str, payload=None, method: Optional[str] = None,
                  raw: bool = False):
-        url = self.base_url + path
         data = None
         headers = {}
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, headers=headers,
-                                     method=method or ("POST" if data else "GET"))
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                body = r.read()
-        except urllib.error.HTTPError as exc:
-            detail = exc.read()[:300].decode("utf-8", "replace")
-            raise EngineError(f"{path} -> HTTP {exc.code}: {detail}") from exc
-        except (urllib.error.URLError, ConnectionError, socket.timeout) as exc:
-            raise EngineError(f"{path} -> {exc}") from exc
-        return body if raw else json.loads(body)
+        last: Optional[Exception] = None
+        for attempt in range(self.retries):
+            # Rebuilt each time: the URL can move under us when the engine is
+            # replaced, and a retry must not reuse the socket that hung.
+            req = urllib.request.Request(
+                self.base_url + path, data=data, headers=headers,
+                method=method or ("POST" if data else "GET"))
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                    body = r.read()
+                return body if raw else json.loads(body)
+            except urllib.error.HTTPError as exc:
+                detail = exc.read()[:300].decode("utf-8", "replace")
+                # A 4xx/5xx is the engine's considered answer, not a hiccup.
+                raise EngineError(f"{path} -> HTTP {exc.code}: {detail}") from exc
+            except (urllib.error.URLError, ConnectionError, socket.timeout,
+                    TimeoutError, OSError) as exc:
+                last = exc
+                if attempt + 1 < self.retries:
+                    time.sleep(min(2.0 * (attempt + 1), 5.0))
+        raise EngineError(f"{path} -> {last}") from last
 
     # -- endpoints --
 
@@ -328,14 +354,113 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+class EngineProcess:
+    """Owns the child engine, and can put a new one in its place.
+
+    Restarting is not housekeeping — it is the only lever that frees a wedged
+    request.  A synthesis that never answers leaves the client blocked in
+    ``recv`` on a healthy-looking socket; killing the process at the other end
+    makes that read fail, which is what lets the run carry on.
+    """
+
+    def __init__(self, run: str, use_gpu: bool = False,
+                 threads: Optional[int] = None, data_home: Optional[str] = None,
+                 startup: float = 180.0, log=None):
+        self.run = run
+        self.use_gpu = use_gpu
+        self.threads = threads
+        self.data_home = data_home or os.path.expanduser(
+            "~/.cache/jisho-subs/voicevox-data")
+        self.startup = startup
+        self.log = log or (lambda *a: None)
+        self.port = free_port()
+        self.proc: Optional[subprocess.Popen] = None
+        self.restarts = 0
+        self._lock = threading.Lock()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def start(self) -> None:
+        os.makedirs(self.data_home, exist_ok=True)
+        cmd = [self.run, "--host", "127.0.0.1", "--port", str(self.port),
+               "--output_log_utf8"]
+        if self.use_gpu:
+            cmd.append("--use_gpu")
+        if self.threads:
+            cmd += ["--cpu_num_threads", str(self.threads)]
+        env = {**os.environ, "XDG_DATA_HOME": self.data_home}
+        self.proc = subprocess.Popen(cmd, cwd=os.path.dirname(self.run), env=env,
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.PIPE)
+        probe = Engine(self.base_url, timeout=10.0, retries=1)
+        deadline = time.monotonic() + self.startup
+        while time.monotonic() < deadline:
+            if self.proc.poll() is not None:
+                err = (self.proc.stderr.read() or b"").decode("utf-8", "replace")
+                raise EngineError(f"the engine exited at startup: {err.strip()[-400:]}")
+            if probe.alive():
+                return
+            time.sleep(0.5)
+        self.stop()
+        raise EngineError(f"the engine did not answer within {self.startup:.0f}s")
+
+    def stop(self) -> None:
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(30)
+        except subprocess.TimeoutExpired:      # pragma: no cover - stubborn child
+            proc.kill()
+            try:
+                proc.wait(10)
+            except subprocess.TimeoutExpired:
+                pass
+
+    def restart(self) -> None:
+        """Replace the engine.  Safe to call from several threads at once."""
+        with self._lock:
+            self.stop()
+            self.port = free_port()            # the old one may still be in TIME_WAIT
+            self.restarts += 1
+            self.log(f"  restarting the engine (restart #{self.restarts})")
+            self.start()
+
+
+def _gpu_works(engine: "Engine", speaker: int = 0) -> Optional[str]:
+    """Synthesise one utterance; return None if it worked, else why it did not.
+
+    Asked at startup rather than discovered later, because the GPU failure mode
+    is a 500 from ``/synthesis`` while ``/version`` and ``/audio_query`` answer
+    perfectly well — the model loads, the CPU-side front end runs, and only the
+    neural decode fails.  A run that finds that out on sentence 400 has wasted
+    the wait.
+    """
+    try:
+        engine.speak("テスト", speaker, pre=0.0, post=0.0)
+        return None
+    except EngineError as exc:
+        return str(exc)[:200]
+
+
 @contextmanager
 def running_engine(engine_path: Optional[str] = None, url: Optional[str] = None,
-                   use_gpu: bool = False, threads: Optional[int] = None,
-                   cache_dir: Optional[str] = None, log=None, startup: float = 180.0):
-    """Yield a live :class:`Engine`, starting one only if none is answering."""
+                   use_gpu=True, threads: Optional[int] = None,
+                   cache_dir: Optional[str] = None, log=None,
+                   startup: float = 180.0, timeout: float = 120.0,
+                   retries: int = 3, speaker: int = 0):
+    """Yield a live :class:`Engine`, starting one only if none is answering.
+
+    ``use_gpu`` may be True (try the GPU, fall back to the CPU if it cannot
+    actually synthesise), False, or "force" to fail rather than fall back.
+    """
     log = log or (lambda *a: None)
 
-    candidate = Engine(url or f"http://127.0.0.1:{DEFAULT_PORT}")
+    candidate = Engine(url or f"http://127.0.0.1:{DEFAULT_PORT}",
+                       timeout=timeout, retries=retries)
     if candidate.alive():
         log(f"using the VOICEVOX engine already at {candidate.base_url}")
         yield candidate
@@ -344,38 +469,37 @@ def running_engine(engine_path: Optional[str] = None, url: Optional[str] = None,
         raise EngineError(f"nothing answering at {url}")
 
     run = ensure_engine(engine_path, cache_dir=cache_dir, log=log)
-    port = free_port()
     data_home = os.path.join(cache_dir or os.path.expanduser("~/.cache/jisho-subs"),
                              "voicevox-data")
-    os.makedirs(data_home, exist_ok=True)
 
-    cmd = [run, "--host", "127.0.0.1", "--port", str(port), "--output_log_utf8"]
-    if use_gpu:
-        cmd.append("--use_gpu")
-    if threads:
-        cmd += ["--cpu_num_threads", str(threads)]
-
-    env = {**os.environ, "XDG_DATA_HOME": data_home}
-    proc = subprocess.Popen(cmd, cwd=os.path.dirname(run), env=env,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    engine = Engine(f"http://127.0.0.1:{port}")
+    process = EngineProcess(run, use_gpu=bool(use_gpu), threads=threads,
+                            data_home=data_home, startup=startup, log=log)
+    process.start()
+    engine = Engine(process.base_url, timeout=timeout, retries=retries,
+                    process=process)
     try:
-        deadline = time.monotonic() + startup
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                err = (proc.stderr.read() or b"").decode("utf-8", "replace")
-                raise EngineError(f"the engine exited at startup: {err.strip()[-400:]}")
-            if engine.alive():
-                break
-            time.sleep(0.5)
+        if use_gpu:
+            why = _gpu_works(engine, speaker)
+            if why is None:
+                log(f"engine {engine.version()} on the GPU")
+            elif use_gpu == "force":
+                raise EngineError(f"the GPU cannot synthesise: {why}")
+            else:
+                log(f"  {C_WARN}the GPU cannot synthesise; using the CPU{C_RESET}")
+                log(f"  ({why})")
+                process.stop()
+                process.use_gpu = False
+                process.port = free_port()
+                process.start()
+                engine.base_url = process.base_url
+                log(f"engine {engine.version()} on the CPU")
         else:
-            raise EngineError(f"the engine did not answer within {startup:.0f}s")
-        log(f"engine {engine.version()} on port {port}"
-            f"{' (GPU)' if use_gpu else ''}")
+            log(f"engine {engine.version()} on the CPU")
         yield engine
     finally:
-        proc.terminate()
-        try:
-            proc.wait(30)
-        except subprocess.TimeoutExpired:      # pragma: no cover - stubborn child
-            proc.kill()
+        process.stop()
+
+
+#: Plain-text markers; the CLI owns colour, this module must not import it.
+C_WARN = ""
+C_RESET = ""

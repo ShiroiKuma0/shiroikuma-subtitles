@@ -46,6 +46,7 @@ import re
 import subprocess
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from typing import Iterator, List, Optional, Tuple
 
@@ -62,6 +63,21 @@ MANIFEST = ".jisho-tts.json"
 
 _SAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
+#: Characters of book text per minute of narration, at speed 1.0.  Measured
+#: against 白い熊's own audiobooks beside their EPUBs, not assumed: Japanese
+#: 1Q84 BOOK1 270, クリスマス・ピッグ 308, 自省録 341; German Der Vorleser 853,
+#: Zur Genealogie der Moral 680.  A Japanese character carries far more than a
+#: German one, so one figure for both is wrong by a factor of two and a half —
+#: which the old hardcoded 400 was, in opposite directions for each language.
+CHARS_PER_MINUTE = {"ja": 300.0, "de": 780.0}
+DEFAULT_CHARS_PER_MINUTE = 800.0
+
+
+def estimate_hours(chars: int, lang: str, speed: float = 1.0) -> float:
+    """Roughly how long `chars` of this language will take to read aloud."""
+    rate = CHARS_PER_MINUTE.get((lang or "").lower()[:2], DEFAULT_CHARS_PER_MINUTE)
+    return chars / (rate * max(speed, 0.01)) / 60.0
+
 
 @dataclass
 class TtsOptions:
@@ -77,8 +93,16 @@ class TtsOptions:
     ruby: str = "differing"           #: differing | always | never
     fmt: str = "m4b"                  #: m4b | wav
     bitrate: str = "64k"
-    jobs: int = 4
+    jobs: int = 0                     #: 0 = one worker per core
+    #: How long one sentence may go unanswered before the engine is presumed
+    #: wedged.  Generous — the slowest real sentence measured is a couple of
+    #: seconds, and a needless restart costs about a minute.
+    stall_seconds: float = 300.0
     language: str = "ja"
+
+    @property
+    def workers(self) -> int:
+        return self.jobs if self.jobs > 0 else (os.cpu_count() or 4)
 
 
 @dataclass
@@ -238,22 +262,55 @@ def _render(engine: Engine, policy: ReadingPolicy, sentence: Sentence,
 
 def render_stream(engine: Engine, policy: ReadingPolicy,
                   sentences: List[Sentence], opts: TtsOptions,
-                  first: int = 0) -> Iterator[Clip]:
-    """Synthesise in parallel, hand back in order.
+                  first: int = 0, log=None) -> Iterator[Clip]:
+    """Synthesise in parallel, hand back in order, and survive a wedged engine.
 
     The engine answers concurrent requests happily, but a book read out of
     order is not a book, so a bounded window of futures is drained in the order
     they were submitted rather than as they finish.
+
+    The stall handling is not defensive programming — it is a bug that
+    happened.  On an 8,460-sentence book the engine stopped answering four
+    in-flight ``/synthesis`` calls after 1,214 sentences.  It stayed healthy:
+    ``/version`` answered in 5 ms and it used no CPU at all.  But those four
+    sockets sat established and silent with empty queues on both sides, the
+    workers blocked in ``recv``, the main thread waited on the first future,
+    and the run hung for 35 minutes until it was killed.  **Replacing the
+    engine is the only thing that makes those reads fail**, so that is what
+    happens here.
     """
-    window = max(2, opts.jobs * 3)
-    with ThreadPoolExecutor(max_workers=opts.jobs) as pool:
-        pending: deque = deque()
+    log = log or (lambda *a: None)
+    workers = opts.workers
+    window = max(2, workers * 3)
+
+    def drain(index: int, fut) -> Clip:
+        try:
+            return fut.result(timeout=opts.stall_seconds)
+        except FutureTimeout:
+            log(f"  nothing back for {opts.stall_seconds:.0f}s — replacing the engine")
+            if engine.restart_backend():
+                try:
+                    return fut.result(timeout=opts.stall_seconds)
+                except FutureTimeout:
+                    pass
+            return Clip(sentences[index], index, None,
+                        "the engine stopped answering")
+
+    pool = ThreadPoolExecutor(max_workers=workers)
+    pending: deque = deque()
+    try:
         for i in range(first, len(sentences)):
-            pending.append(pool.submit(_render, engine, policy, sentences[i], i, opts))
+            pending.append((i, pool.submit(_render, engine, policy,
+                                           sentences[i], i, opts)))
             if len(pending) >= window:
-                yield pending.popleft().result()
+                yield drain(*pending.popleft())
         while pending:
-            yield pending.popleft().result()
+            yield drain(*pending.popleft())
+    finally:
+        # Never wait here.  A wedged worker is blocked in a socket read that
+        # only an engine restart can break, and shutdown(wait=True) hangs the
+        # exit on it — which is what made Ctrl-C useless the first time.
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 # -- track assembly ------------------------------------------------------
@@ -454,7 +511,8 @@ def speak_book(engine: Engine, sentences: List[Sentence], out_dir: str,
         state["writer"] = None
 
     try:
-        for clip in render_stream(engine, policy, sentences, opts, first=cursor):
+        for clip in render_stream(engine, policy, sentences, opts,
+                                  first=cursor, log=log):
             state["consumed"] += 1
             if progress is not None:
                 progress.advance(clip.sentence.text[:48],

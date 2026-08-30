@@ -440,7 +440,8 @@ def cmd_tts(args) -> int:
     ruby_count = sum(len(s.ruby) for s in sentences)
     chars = sum(len(s.text) for s in sentences)
     step(f"{len(sentences)} sentences, {chars:,} characters, "
-         f"{ruby_count:,} furigana readings")
+         f"{ruby_count:,} furigana readings, "
+         f"~{tts_mod.estimate_hours(chars, lang, args.tts_speed):.1f} h of audio")
 
 
     opts = tts_mod.TtsOptions(
@@ -449,7 +450,8 @@ def cmd_tts(args) -> int:
         split=args.tts_split, track_seconds=args.tts_track_minutes * 60.0,
         min_chapter_chars=args.tts_min_chapter,
         ruby=args.tts_ruby, fmt=args.tts_format,
-        jobs=args.jobs or 4, language=lang)
+        jobs=args.jobs or 0, stall_seconds=args.tts_stall,
+        language=lang)
 
     chapters = tts_mod.plan_chapters(sentences, opts)
     if chapters is not None:
@@ -461,11 +463,12 @@ def cmd_tts(args) -> int:
         log(f"would read it aloud into {out_dir}")
         log(f"  voice {args.tts_speaker}, ruby {args.tts_ruby}, "
             f"speed {args.tts_speed:g}, {args.tts_format}")
-        log(f"  roughly {chars / 400 / 60:.1f} hours of audio")
+        log(f"  roughly {tts_mod.estimate_hours(chars, lang, args.tts_speed):.1f} "
+            f"hours of audio")
         return 0
 
     with voicevox.running_engine(engine_path=args.tts_engine, url=args.tts_url,
-                                 use_gpu=args.tts_gpu, threads=args.jobs,
+                                 use_gpu=args.tts_gpu,
                                  cache_dir=args.cache_dir, log=log) as engine:
         opts.speaker = _resolve_speaker(engine, args.tts_speaker)
         style = next((st for st in engine.styles() if st.id == opts.speaker), None)
@@ -1102,12 +1105,20 @@ examples:
                              "(default: 30)")
     speech.add_argument("--tts-format", default="m4b", choices=("m4b", "wav"),
                         help="output format (default: m4b)")
+    speech.add_argument("--tts-stall", type=float, default=300.0,
+                        metavar="SECONDS",
+                        help="replace the engine when a sentence goes "
+                             "unanswered this long (default: 300)")
     speech.add_argument("--tts-engine", metavar="DIR",
                         help="path to an unpacked vv-engine directory")
     speech.add_argument("--tts-url", metavar="URL",
                         help="use an engine already running here")
-    speech.add_argument("--tts-gpu", action="store_true",
-                        help="synthesise on the GPU")
+    speech.add_argument("--tts-gpu", dest="tts_gpu", action="store_true",
+                        default=True,
+                        help="synthesise on the GPU (the default; falls back to "
+                             "the CPU if the GPU cannot actually synthesise)")
+    speech.add_argument("--tts-no-gpu", dest="tts_gpu", action="store_false",
+                        help="do not try the GPU at all")
 
     run = p.add_argument_group("how to run")
     run.add_argument("-n", "--dry-run", action="store_true",

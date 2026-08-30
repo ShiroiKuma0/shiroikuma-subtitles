@@ -141,6 +141,9 @@ class FakeEngine:
         self.spoken.append(text)
         return _wav_of(len(text) * 0.1, self.rate)
 
+    def restart_backend(self):
+        return False
+
 
 def _wav_of(seconds: float, rate: int = 24000) -> bytes:
     buf = io.BytesIO()
@@ -443,3 +446,157 @@ def test_one_track_is_written_per_planned_chapter(tmp_path):
 
 def test_the_default_speed_is_the_one_chosen_by_ear():
     assert tts_mod.TtsOptions().speed == 1.15
+
+
+# -- surviving a wedged engine -------------------------------------------
+
+def test_a_stalled_sentence_is_freed_by_restarting_the_engine(tmp_path):
+    """The real failure: four /synthesis calls went unanswered on a healthy
+    engine, the workers blocked in recv, and the run hung for 35 minutes.
+    Replacing the engine is the only thing that frees those reads."""
+    import threading
+
+    class Stalling(FakeEngine):
+        def __init__(self):
+            super().__init__()
+            self.gate = threading.Event()
+            self.restarts = 0
+            self.stall_once = True
+
+        def speak(self, text, speaker, **kw):
+            if self.stall_once:
+                self.stall_once = False
+                self.gate.wait(30)          # only a restart lets this through
+            return super().speak(text, speaker, **kw)
+
+        def restart_backend(self):
+            self.restarts += 1
+            self.gate.set()
+            return True
+
+    engine = Stalling()
+    opts = tts_mod.TtsOptions(gap=0.0, fmt="wav", jobs=2, stall_seconds=0.5,
+                              track_seconds=10_000, split="time")
+    stats = tts_mod.speak_book(engine, _distinct(4), str(tmp_path), "book", opts)
+    assert engine.restarts >= 1, "it never replaced the engine"
+    assert stats.sentences == 4, "a stall must not cost the sentence"
+
+
+def test_a_stall_that_survives_the_restart_is_reported_not_hung(tmp_path):
+    class Dead(FakeEngine):
+        def speak(self, text, speaker, **kw):
+            import time
+            time.sleep(30)
+
+        def restart_backend(self):
+            return False                    # nothing owned; cannot recover
+
+    opts = tts_mod.TtsOptions(gap=0.0, fmt="wav", jobs=1, stall_seconds=0.3,
+                              track_seconds=10_000, split="time")
+    stats = tts_mod.speak_book(Dead(), _distinct(1), str(tmp_path), "book", opts)
+    assert stats.sentences == 0
+    assert stats.failures and "stopped answering" in stats.failures[0][1]
+
+
+# -- defaults and estimates ----------------------------------------------
+
+def test_workers_default_to_one_per_core():
+    assert tts_mod.TtsOptions().jobs == 0
+    assert tts_mod.TtsOptions().workers == (os.cpu_count() or 4)
+    assert tts_mod.TtsOptions(jobs=3).workers == 3
+
+
+def test_the_hours_estimate_is_per_language_and_measured():
+    """One rate for every language was wrong by 2.5x: a Japanese character
+    carries far more than a German one."""
+    ja = tts_mod.estimate_hours(1_000_000, "ja")
+    de = tts_mod.estimate_hours(1_000_000, "de")
+    assert de < ja, "German should take less time for the same character count"
+    assert ja / de == pytest.approx(780 / 300, rel=0.01)
+    # Measured: 1Q84 270, クリスマス・ピッグ 308, 自省録 341 chars/min.
+    assert 250 <= 1_000_000 / (ja * 60) <= 350
+    # Measured: Der Vorleser 853, Genealogie der Moral 680 chars/min.
+    assert 650 <= 1_000_000 / (de * 60) <= 900
+    # An unknown language still gets an answer rather than a crash.
+    assert tts_mod.estimate_hours(1_000_000, "xx") > 0
+
+
+def test_speed_shortens_the_estimate():
+    assert tts_mod.estimate_hours(100_000, "ja", 1.15) < \
+        tts_mod.estimate_hours(100_000, "ja", 1.0)
+
+
+# -- the client's own resilience -----------------------------------------
+
+def test_a_transport_hiccup_is_retried_not_fatal(monkeypatch):
+    """A dropped connection mid-book must not end the book."""
+    import urllib.error
+    from jisho_subs import voicevox
+
+    calls = {"n": 0}
+
+    class Body:
+        def read(self):
+            return b'"0.25.2"'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def flaky(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise urllib.error.URLError("connection reset")
+        return Body()
+
+    monkeypatch.setattr(voicevox.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(voicevox.time, "sleep", lambda s: None)
+    eng = voicevox.Engine("http://127.0.0.1:1", retries=3)
+    assert eng.version() == "0.25.2"
+    assert calls["n"] == 3
+
+
+def test_a_request_that_never_succeeds_raises_rather_than_blocking(monkeypatch):
+    import urllib.error
+    from jisho_subs import voicevox
+
+    def dead(req, timeout=None):
+        raise urllib.error.URLError("nothing there")
+
+    monkeypatch.setattr(voicevox.urllib.request, "urlopen", dead)
+    monkeypatch.setattr(voicevox.time, "sleep", lambda s: None)
+    eng = voicevox.Engine("http://127.0.0.1:1", retries=2)
+    with pytest.raises(voicevox.EngineError):
+        eng.version()
+
+
+def test_an_http_error_is_not_retried():
+    """A 500 is the engine's considered answer — retrying it just wastes time.
+    This is how the GPU probe learns the GPU cannot synthesise."""
+    import urllib.error
+    from jisho_subs import voicevox
+    import io as _io
+
+    calls = {"n": 0}
+
+    def five_hundred(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 500, "Internal Server Error",
+                                     {}, _io.BytesIO(b'{"detail":"boom"}'))
+
+    import unittest.mock as mock
+    with mock.patch.object(voicevox.urllib.request, "urlopen", five_hundred):
+        eng = voicevox.Engine("http://127.0.0.1:1", retries=3)
+        with pytest.raises(voicevox.EngineError):
+            eng.version()
+    assert calls["n"] == 1, "a considered 500 was retried"
+
+
+def test_the_client_has_a_finite_timeout_by_default():
+    """The hang happened with a client that waited indefinitely in practice."""
+    from jisho_subs import voicevox
+    eng = voicevox.Engine()
+    assert 0 < eng.timeout <= 300
+    assert eng.retries >= 2
