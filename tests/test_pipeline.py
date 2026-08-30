@@ -819,11 +819,15 @@ def test_the_short_tts_help_states_the_actual_defaults():
     out = subprocess.run(["bash", WRAPPER, "-h", "tts"], capture_output=True,
                          text=True, env={**os.environ, "NO_COLOR": "1"}).stdout
     assert str(TtsOptions().speaker) in out, "the default voice id is not shown"
-    assert str(TtsOptions().speed) in out, "the default speed is not shown"
 
-    # And the code's own defaults must agree with the parser's.
+    from jisho_subs.tts import default_speed
+    # Speed depends on the language, so both figures have to be discoverable.
+    assert str(default_speed("ja")) in out, "the Japanese default speed is missing"
+    assert str(default_speed("de")) in out, "the German default speed is missing"
+    assert default_speed("ja") == TtsOptions().speed
+
     args = build_parser().parse_args(["--tts"])
-    assert args.tts_speed == TtsOptions().speed
+    assert args.tts_speed is None, "speed must stay unset until the language is known"
     assert args.tts_split == TtsOptions().split
 
 

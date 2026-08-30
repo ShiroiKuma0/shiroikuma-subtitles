@@ -507,18 +507,22 @@ def test_workers_default_to_one_per_core():
 
 
 def test_the_hours_estimate_is_per_language_and_measured():
-    """One rate for every language was wrong by 2.5x: a Japanese character
-    carries far more than a German one."""
+    """One rate for every language was wrong by a factor of four: a Japanese
+    character carries far more than a German one, and the engines differ too."""
     ja = tts_mod.estimate_hours(1_000_000, "ja")
     de = tts_mod.estimate_hours(1_000_000, "de")
     assert de < ja, "German should take less time for the same character count"
-    assert ja / de == pytest.approx(780 / 300, rel=0.01)
-    # Measured: 1Q84 270, クリスマス・ピッグ 308, 自省録 341 chars/min.
-    assert 250 <= 1_000_000 / (ja * 60) <= 350
-    # Measured: Der Vorleser 853, Genealogie der Moral 680 chars/min.
-    assert 650 <= 1_000_000 / (de * 60) <= 900
     # An unknown language still gets an answer rather than a crash.
     assert tts_mod.estimate_hours(1_000_000, "xx") > 0
+
+
+@pytest.mark.parametrize("chars, lang, hours", [
+    (10_599, "ja", 0.61),     # 人魚のひいさま through VOICEVOX
+    (67_670, "de", 0.96),     # Briefe an einen jungen Dichter through Piper
+])
+def test_the_estimate_matches_what_those_books_actually_produced(chars, lang, hours):
+    """The rates come from finished runs, so they must reproduce them."""
+    assert tts_mod.estimate_hours(chars, lang, 1.0) == pytest.approx(hours, abs=0.03)
 
 
 def test_speed_shortens_the_estimate():

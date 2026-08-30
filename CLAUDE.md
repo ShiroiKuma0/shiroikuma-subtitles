@@ -313,6 +313,64 @@ than half.
 Throughput measured on 24 CPU cores: **9.6× realtime single-stream**, ~10× at
 `--jobs 12`.
 
+## German (`--tts` on a German book, Piper)
+
+**The engine follows the language**: `ja` → VOICEVOX, everything else → Piper.
+`tts.py` asks an engine for `speak(text) -> WAV` and `reading_of(word)` and
+nothing else, so a second engine is a second client — chapters, exact cues,
+resume and the stall watchdog are all untouched.
+
+**The Japanese argument does not transfer, and pretending otherwise would be
+wrong.** VOICEVOX won Japanese on *correctness*. German has no equivalent:
+espeak-ng's `de_list` is 16 KB of exceptions over letter-to-sound rules, and
+German orthography is shallow enough that the rules carry most words. No engine
+wins German on reading accuracy — so Piper is chosen for being local, free and
+good enough, and Azure at roughly $9 a book is the paid alternative. There is
+also **no German TTS quality benchmark at all**: voicearena's German table reads
+"No models yet for this selection", so 白い熊 chose thorsten-medium by ear from
+samples, which was the only evidence available.
+
+**What German gets wrong is convention, not phonetics** — and every engine gets
+it wrong identically, so `german.py` fixes it before the engine. Measured on
+espeak-ng: `am 1. Mai 1889` → "eins Mai eintausendachthundert…", `z. B.` spelled
+letter by letter, `27,50 €` → "komma fünf null Euro". Nineteenth-century
+spelling needs **nothing** — ⟨th⟩ is /t/ and ⟨ie⟩ is /iː/ already, so `Thut`,
+`giebt`, `Theil` come out right and the pass must not meddle with them.
+
+**Ordinals are expanded only where the ending is certain.** German ordinals
+inflect (*vierte / viertes / vierten*) and choosing needs a case parse. A bare
+`4.` is left as digits: espeak saying *vier* is wrong in a small way, *viertes*
+for *vierten* is wrong in a way a learner would copy.
+
+**Piper's `length_scale` moves duration by about 65% of what is asked.**
+Measured on de_DE-thorsten-medium over five runs: 0.87 gave 0.917x, 0.75 gave
+0.832x. `length_scale_for()` corrects it so `--tts-speed` means the same thing
+on both engines. The duration predictor is also *stochastic* — the same
+sentence varies several per cent between runs — which costs nothing because
+every cue is timed from the audio actually produced.
+
+**Default speed is per language**: 1.15 Japanese, 1.0 German. 1.15 was chosen
+by ear against VOICEVOX; the German samples 白い熊 approved were Piper's own
+default, and Piper at 1.0 is *already* brisk — 1175 chars/min against a human
+narrator's 680–853.
+
+**pysbd protects quoted spans, and German quotes do not always balance.** «Zur
+Genealogie der Moral» has a block with 28 `»` and 27 `«`, so one unmatched mark
+swallowed everything after it: a single "sentence" of 8,481 characters holding
+22 sentence endings, which would have been one half-hour cue.
+`_split_overlong()` breaks only pieces past 400 characters, so ordinary
+dialogue keeps its protection, and refuses a split where the word before the
+stop looks like an abbreviation or an initial ("Prof. Dr. Müller"). That book
+went from 747 sentences (max 8,480) to 1,350 (max 2,216) — and the 2,216 one
+contains no sentence break at all, so it is genuinely one Nietzsche sentence.
+
+Measured: **68x realtime** on 24 cores, so a German book is minutes rather than
+hours — Rilke's Briefe, 67,670 characters, took 50 seconds. Piper is in-process,
+so `restart_backend()` is honestly False and the stall watchdog never fires.
+
+`piper-tts` is an optional extra (`pip install -e '.[piper]'`), because Japanese
+needs no package at all.
+
 ## Architecture note
 
 There is no chapter matching, and adding it would be a regression. Global

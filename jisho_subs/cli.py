@@ -414,27 +414,58 @@ def _resolve_speaker(engine, want) -> int:
     return hits[0].id
 
 
+#: Japanese is VOICEVOX's alone — its OpenJTalk dictionary is the whole reason
+#: it was chosen.  Everything else goes to Piper, which has voices for a dozen
+#: languages and no dictionary worth defending.
+def _engine_for(lang: str) -> str:
+    return "voicevox" if (lang or "").lower()[:2] == "ja" else "piper"
+
+
+def _open_engine(args, lang: str):
+    """The right engine for this language, as a context manager."""
+    from . import piper as piper_mod, voicevox
+
+    if _engine_for(lang) == "voicevox":
+        return voicevox.running_engine(
+            engine_path=args.tts_engine, url=args.tts_url,
+            use_gpu=args.tts_gpu, cache_dir=args.cache_dir, log=log)
+    return piper_mod.running_engine(
+        voice=args.tts_speaker if args.tts_speaker else None,
+        lang=lang, cache_dir=args.cache_dir, log=log)
+
+
 def cmd_tts(args) -> int:
     """Read a book aloud instead of aligning it to a recording."""
     from .source import load_source, book_metadata
     from .segment import segment
     from .progress import Progress
-    from . import voicevox, tts as tts_mod
+    from . import german, piper as piper_mod, tts as tts_mod
 
     if args.tts_voices:
-        with voicevox.running_engine(engine_path=args.tts_engine, url=args.tts_url,
-                                     cache_dir=args.cache_dir, log=log) as engine:
+        lang = args.lang or "ja"
+        if _engine_for(lang) == "piper":
+            have = piper_mod.installed_voices(args.cache_dir)
+            log(f"Piper voices installed for {lang}:")
+            for v in have or ["(none yet — one is downloaded on first use)"]:
+                print(f"       {v}")
+            log("any voice name from rhasspy/piper-voices works, e.g. "
+                "de_DE-thorsten-high")
+            return 0
+        with _open_engine(args, lang) as engine:
             for st in engine.styles():
                 print(f"{st.id:5d}  {st.label}")
         return 0
 
     source = _resolve_reference_only(args)
     lang = _resolve_language(args, source)
+    if args.tts_speed is None:
+        args.tts_speed = tts_mod.default_speed(lang)
     meta = book_metadata(source)
     stem = os.path.splitext(os.path.basename(source))[0].split(" -- ")[0].strip()
 
+    engine_name = "VOICEVOX" if _engine_for(lang) == "voicevox" else "Piper"
     out_dir = args.out or os.path.join(os.path.dirname(os.path.abspath(source)),
-                                       f"{stem} (VOICEVOX)")
+                                       f"{stem} ({engine_name})")
     blocks = load_source(source)
     sentences = segment(blocks, lang)
     ruby_count = sum(len(s.ruby) for s in sentences)
@@ -453,6 +484,7 @@ def cmd_tts(args) -> int:
         jobs=args.jobs or 0, stall_seconds=args.tts_stall,
         language=lang)
 
+    normalise = german.normalise if lang.startswith("de") else None
     chapters = tts_mod.plan_chapters(sentences, opts)
     if chapters is not None:
         titled = sum(1 for c in chapters if c.title)
@@ -461,16 +493,20 @@ def cmd_tts(args) -> int:
 
     if args.dry_run:
         log(f"would read it aloud into {out_dir}")
-        log(f"  voice {args.tts_speaker}, ruby {args.tts_ruby}, "
+        voice = args.tts_speaker or (
+            "読み聞かせ" if _engine_for(lang) == "voicevox"
+            else piper_mod.default_voice(lang) or "?")
+        log(f"  {engine_name}, voice {voice}, ruby {args.tts_ruby}, "
             f"speed {args.tts_speed:g}, {args.tts_format}")
+        if normalise is not None:
+            log("  German normalisation on: dates, abbreviations, ordinals, money")
         log(f"  roughly {tts_mod.estimate_hours(chars, lang, args.tts_speed):.1f} "
             f"hours of audio")
         return 0
 
-    with voicevox.running_engine(engine_path=args.tts_engine, url=args.tts_url,
-                                 use_gpu=args.tts_gpu,
-                                 cache_dir=args.cache_dir, log=log) as engine:
-        opts.speaker = _resolve_speaker(engine, args.tts_speaker)
+    with _open_engine(args, lang) as engine:
+        opts.speaker = (_resolve_speaker(engine, args.tts_speaker or "読み聞かせ")
+                        if _engine_for(lang) == "voicevox" else 0)
         style = next((st for st in engine.styles() if st.id == opts.speaker), None)
         step(f"reading it as {style.label if style else opts.speaker} "
              f"into {out_dir}")
@@ -478,7 +514,7 @@ def cmd_tts(args) -> int:
         try:
             stats = tts_mod.speak_book(engine, sentences, out_dir, stem, opts,
                                        meta=meta, log=log, progress=bar,
-                                       force=args.force)
+                                       force=args.force, normalise=normalise)
         finally:
             bar.close()
 
@@ -1080,15 +1116,15 @@ examples:
     speech = p.add_argument_group("text-to-speech (--tts)")
     speech.add_argument("--tts-voices", action="store_true",
                         help="list the available VOICEVOX voices and stop")
-    speech.add_argument("--tts-speaker", default="読み聞かせ", metavar="VOICE",
+    speech.add_argument("--tts-speaker", default=None, metavar="VOICE",
                         help="voice id or name "
                              "(default: 31 — No.7 / 読み聞かせ)")
     speech.add_argument("--tts-ruby", default="differing",
                         choices=("differing", "always", "never"),
                         help="when to let the book's furigana override the "
                              "engine (default: differing)")
-    speech.add_argument("--tts-speed", type=float, default=1.15, metavar="X",
-                        help="speaking rate (default: 1.15)")
+    speech.add_argument("--tts-speed", type=float, default=None, metavar="X",
+                        help="speaking rate (default: 1.15 Japanese, 1.0 German)")
     speech.add_argument("--tts-split", default="chapter",
                         choices=("chapter", "document", "time"),
                         help="what makes a track: one per chapter (default), "

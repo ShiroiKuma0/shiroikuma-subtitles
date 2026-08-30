@@ -25,6 +25,9 @@ dependencies = [
 # LD_LIBRARY_PATH.  Normally they arrive as torch dependencies — this package
 # does not use torch, so it asks for them directly.
 cuda = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12"]
+# The German voice.  Japanese talks to VOICEVOX over HTTP and needs no package;
+# Piper is a library, so it is only a dependency for the languages that use it.
+piper = ["piper-tts>=1.7"]
 dev = ["pytest>=7.4"]
 
 [project.scripts]

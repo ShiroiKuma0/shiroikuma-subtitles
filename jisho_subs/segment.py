@@ -92,6 +92,56 @@ def _reattach_orphans(pieces: List[str]) -> List[str]:
     return [p for p in out if _HAS_WORD.search(p)]
 
 
+#: Past this many characters a "sentence" is certainly several.  At German
+#: narration speed 400 characters is about half a minute of unbroken audio,
+#: which is no longer a subtitle.
+OVERLONG = 400
+
+#: A sentence end that a segmenter missed: terminal punctuation, optional
+#: closing quotes or brackets, then whitespace and something that starts a
+#: sentence.  German capitalises its nouns, so the capital alone is weak
+#: evidence — the guard is the word *before* the stop.
+_MISSED_BREAK = re.compile(r'(?<=[.!?])(["»«”』」）)\]]*)\s+(?=[«»„“"\'(\[–—]?[A-ZÄÖÜ])')
+
+#: An abbreviation or an initial, where the period is not a sentence end.
+_NOT_A_STOP = re.compile(r'(?:^|[\s(])(?:[A-Za-zÄÖÜäöü]{1,2}|[A-ZÄÖÜ])\.$')
+
+
+def _split_overlong(pieces: List[str], limit: int = OVERLONG) -> List[str]:
+    """Break pieces the segmenter left far too long.
+
+    pysbd protects quoted spans from splitting, which is right for dialogue and
+    catastrophic when the quotes do not balance: «Zur Genealogie der Moral»
+    has a block with 28 ``»`` and 27 ``«``, so one unmatched mark swallowed
+    everything after it — 8,481 characters holding 22 sentence endings, which
+    would have become a single half-hour cue.
+
+    Only over-long pieces are touched, so ordinary dialogue keeps the
+    protection it is given.  A split is refused when the word before the stop
+    looks like an abbreviation or an initial, because "Prof. Dr. Müller" is
+    worth more than one extra break.
+    """
+    out: List[str] = []
+    for piece in pieces:
+        if len(piece) <= limit:
+            out.append(piece)
+            continue
+        cuts, last = [], 0
+        for m in _MISSED_BREAK.finditer(piece):
+            head = piece[last:m.end(1)]
+            if _NOT_A_STOP.search(head.rstrip()):
+                continue
+            if len(head.strip()) < 2:
+                continue
+            cuts.append(head.strip())
+            last = m.end()
+        tail = piece[last:].strip()
+        if tail:
+            cuts.append(tail)
+        out.extend(cuts if len(cuts) > 1 else [piece])
+    return out
+
+
 def split_block(text: str, lang: str) -> List[str]:
     try:
         parts = _segmenter(lang).segment(text)
@@ -99,7 +149,8 @@ def split_block(text: str, lang: str) -> List[str]:
         # pysbd occasionally trips on pathological input; a whole block is a
         # far better fallback than losing it.
         parts = [text]
-    return _reattach_orphans([p.strip() for p in parts if p and p.strip()])
+    pieces = _reattach_orphans([p.strip() for p in parts if p and p.strip()])
+    return _split_overlong(pieces)
 
 
 def segment(blocks: List[Block], lang: str) -> List[Sentence]:

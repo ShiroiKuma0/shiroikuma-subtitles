@@ -63,14 +63,29 @@ MANIFEST = ".jisho-tts.json"
 
 _SAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
-#: Characters of book text per minute of narration, at speed 1.0.  Measured
-#: against 白い熊's own audiobooks beside their EPUBs, not assumed: Japanese
-#: 1Q84 BOOK1 270, クリスマス・ピッグ 308, 自省録 341; German Der Vorleser 853,
-#: Zur Genealogie der Moral 680.  A Japanese character carries far more than a
-#: German one, so one figure for both is wrong by a factor of two and a half —
-#: which the old hardcoded 400 was, in opposite directions for each language.
-CHARS_PER_MINUTE = {"ja": 300.0, "de": 780.0}
-DEFAULT_CHARS_PER_MINUTE = 800.0
+#: Characters of book text per minute of *synthesised* audio at speed 1.0, gaps
+#: included — this predicts what we are about to make, so it is the engine's
+#: rate that matters and not a narrator's.  Measured on finished runs: VOICEVOX
+#: Japanese 人魚のひいさま, 10,599 characters in 0.61 h = 290/min; Piper German
+#: Briefe an einen jungen Dichter, 67,670 in 0.96 h = 1175/min.
+#:
+#: For context the human narrators of the same library read Japanese at 270–341
+#: and German at 680–853, so VOICEVOX paces about like a narrator while Thorsten
+#: at 1.0 is already brisk — which is part of why German does not inherit the
+#: 1.15 chosen for Japanese.  One figure for both languages is wrong by a factor
+#: of four; the old hardcoded 400 was wrong in both directions at once.
+CHARS_PER_MINUTE = {"ja": 290.0, "de": 1175.0}
+
+#: Speaking rate 白い熊 chose by ear, per language.  1.15 was picked against
+#: VOICEVOX on Japanese; the German samples that were approved were Piper's own
+#: default, so German stays at 1.0 rather than inheriting a number chosen for a
+#: different engine and a different language.
+DEFAULT_SPEED = {"ja": 1.15, "de": 1.0}
+
+
+def default_speed(lang: str) -> float:
+    return DEFAULT_SPEED.get((lang or "").lower()[:2], 1.0)
+DEFAULT_CHARS_PER_MINUTE = 900.0
 
 
 def estimate_hours(chars: int, lang: str, speed: float = 1.0) -> float:
@@ -130,10 +145,16 @@ class ReadingPolicy:
     distinct annotated word for the whole book, not one per occurrence.
     """
 
-    def __init__(self, engine: Engine, speaker: int, mode: str = "differing"):
+    def __init__(self, engine: Engine, speaker: int, mode: str = "differing",
+                 normalise=None):
         self.engine = engine
         self.speaker = speaker
         self.mode = mode
+        #: Applied to the spoken copy after ruby, if the language has a
+        #: normaliser.  German needs one and Japanese does not: what German
+        #: engines get wrong is dates, abbreviations and ordinals rather than
+        #: readings.  See ``german.py``.
+        self.normalise = normalise
         self.seen = 0
         self.applied = 0
         self.agreed = 0
@@ -158,10 +179,17 @@ class ReadingPolicy:
         return True
 
     def spoken(self, sentence: Sentence) -> str:
-        """The text to hand the engine: the sentence, with readings corrected."""
-        if not sentence.ruby or self.mode == "never":
-            return sentence.text
-        return ruby_mod.apply(sentence.text, sentence.ruby, accept=self.accept)
+        """The text to hand the engine: the sentence, corrected and normalised.
+
+        The subtitle keeps ``sentence.text`` untouched — what 白い熊 reads is
+        the book, never our expansion of it.
+        """
+        text = sentence.text
+        if sentence.ruby and self.mode != "never":
+            text = ruby_mod.apply(text, sentence.ruby, accept=self.accept)
+        if self.normalise is not None:
+            text = self.normalise(text)
+        return text
 
 
 
@@ -447,7 +475,8 @@ def _retag_totals(paths: List[str], log=None) -> None:
 
 def speak_book(engine: Engine, sentences: List[Sentence], out_dir: str,
                stem: str, opts: TtsOptions, meta: Optional[dict] = None,
-               log=None, progress=None, force: bool = False) -> TtsStats:
+               log=None, progress=None, force: bool = False,
+               normalise=None) -> TtsStats:
     """Read `sentences` aloud into `out_dir`, writing an SRT beside each track."""
     from . import srt as srt_mod
 
@@ -466,7 +495,8 @@ def speak_book(engine: Engine, sentences: List[Sentence], out_dir: str,
 
     chapters = plan_chapters(sentences, opts)
     starts = {c.first: c for c in chapters} if chapters is not None else None
-    policy = ReadingPolicy(engine, opts.speaker, opts.ruby)
+    policy = ReadingPolicy(engine, opts.speaker, opts.ruby,
+                           normalise=normalise)
     written: List[str] = [os.path.join(out_dir, r["name"]) for r in tracks]
 
     state = {"writer": None, "cues": [], "first": cursor, "consumed": 0,

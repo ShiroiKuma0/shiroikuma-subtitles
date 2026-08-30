@@ -130,6 +130,12 @@ ${C}READING A BOOK ALOUD${R}  ${C}(--tts)${R}
     here, no voice-activity detection and no interpolation: the timings are
     ${B}exact by construction${R}, not recovered.
 
+    ${B}The engine follows the language.${R}  Japanese goes to ${C}VOICEVOX${R}, everything
+    else to ${C}Piper${R} — German with ${D}de_DE-thorsten-medium${R}, and voices exist for
+    English, French, Spanish, Italian, Dutch, Polish and Russian.  Both are
+    local and free, and the pipeline is the same either way: one sentence per
+    request, exact cues, one M4B per chapter.
+
     ${B}Why VOICEVOX and not a paid service.${R}  Its front end is OpenJTalk with a
     real accent dictionary, so it ${B}looks readings up${R} rather than inferring them
     from the kanji.  Against the six words a 2026 benchmark reports every
@@ -205,6 +211,26 @@ ${C}READING A BOOK ALOUD${R}  ${C}(--tts)${R}
     stayed established and silent, and the run hung for 35 minutes.  Nothing
     but replacing the engine frees those reads, so that is what happens after
     ${C}--tts-stall${R} seconds, and the sentence is retried rather than lost.
+
+    ${B}German is a different argument, and a weaker one.${R}  VOICEVOX won Japanese
+    on ${B}correctness${R} — a real accent dictionary against models that guess.
+    German has no such engine: espeak-ng's German is 16 KB of exceptions over
+    letter-to-sound rules, and German spelling is shallow enough that the rules
+    carry most words unaided.  No engine wins German on reading accuracy, so
+    Piper is chosen for being local, free and good enough.  ${D}Azure at roughly
+    nine dollars a book is the paid alternative if the voice grates.${R}
+
+    ${B}What German actually gets wrong is convention, not phonetics${R} — and every
+    engine gets it wrong identically, so the fix is ours and sits before the
+    engine.  ${D}am 1. Mai 1889${R} is read "eins Mai eintausendachthundert…";
+    ${D}z. B.${R} is spelled out letter by letter; ${D}27,50 €${R} becomes "komma fünf
+    null Euro".  All of that is expanded first.  Nineteenth-century spelling
+    needs nothing — ${D}Thut${R}, ${D}giebt${R}, ${D}Theil${R} come out right under the rules
+    already — so it is left alone.
+
+    ${D}German ordinals inflect (${R}${D}vierte / viertes / vierten${R}${D}) and choosing needs a
+    parse, so one is expanded only where the article makes it certain.  A bare
+    "4." is left as digits rather than guessed at.${R}
 
     ${M}The voice is the compromise.${R}  VOICEVOX calls its own output 中品質 and its
     cast is built for characters, not narration; ${C}--tts-voices${R} lists what is
@@ -407,14 +433,17 @@ ${C}OPTIONS${R}
 
   ${B}Reading a book aloud${R} ${D}(--tts)${R}
     ${C}--tts-voices${R}          list the available voices and stop
-    ${C}--tts-speaker${R} VOICE   voice id, or any unambiguous part of its name.
-                          ${D}Default ${R}${C}31${R}${D} — No.7 / 読み聞かせ, the one style in the
-                          cast built for reading aloud.  ${R}${C}--tts-voices${R}${D} lists
-                          the other ~120.${R}
+    ${C}--tts-speaker${R} VOICE   Japanese: a VOICEVOX voice id or part of its name
+                          ${D}(default ${R}${C}31${R}${D} — No.7 / 読み聞かせ, the one style built
+                          for reading aloud; ${R}${C}--tts-voices${R}${D} lists ~120 more).${R}
+                          Other languages: a Piper voice name
+                          ${D}(default ${R}${C}de_DE-thorsten-medium${R}${D} for German; any name
+                          from rhasspy/piper-voices works, downloaded once)${R}
     ${C}--tts-ruby${R} WHEN       when the book's furigana overrides the engine:
                           ${C}differing${R} only where the engine reads it another
                           way ${D}(default)${R}, ${C}always${R}, or ${C}never${R}
-    ${C}--tts-speed${R} X         speaking rate ${D}(default: 1.15)${R}
+    ${C}--tts-speed${R} X         speaking rate ${D}(default: 1.15 Japanese, 1.0 German —
+                          each chosen by ear on its own engine)${R}
     ${C}--tts-split${R} WHAT      what makes one M4B: ${C}chapter${R} ${D}(default)${R},
                           ${C}document${R} one per spine file, or ${C}time${R} to fill
                           ${C}--tts-track-minutes${R}
@@ -541,11 +570,14 @@ EOF
 # in the full manual.  The list is *extracted* from print_help rather than
 # written out again, so a new flag cannot appear in one and not the other.
 print_tts_help() {
-    printf '%s%s --tts%s — read a book aloud with VOICEVOX\n' "$Y" "$PROG" "$R"
-    printf '  %sDefaults:%s voice %s31 — No.7 / 読み聞かせ%s   speed %s1.15%s   %sone M4B per chapter%s\n' \
-        "$B" "$R" "$C" "$R" "$C" "$R" "$C" "$R"
-    printf '            %sGPU when it works, else CPU%s   %sone worker per core%s\n' \
-        "$C" "$R" "$C" "$R"
+    printf '%s%s --tts%s — read a book aloud, locally and free\n' "$Y" "$PROG" "$R"
+    printf '  %sJapanese%s VOICEVOX, voice %s31 — No.7 / 読み聞かせ%s, speed %s1.15%s\n' \
+        "$B" "$R" "$C" "$R" "$C" "$R"
+    printf '  %sGerman  %s Piper, voice %sde_DE-thorsten-medium%s, speed %s1.0%s, dates and\n' \
+        "$B" "$R" "$C" "$R" "$C" "$R"
+    printf '            abbreviations expanded first\n'
+    printf '  %sBoth    %s %sone M4B per chapter%s, %sone worker per core%s, GPU where it works\n' \
+        "$B" "$R" "$C" "$R" "$C" "$R"
     # Both blocks are lifted out of print_help rather than written a second
     # time, so a new flag or a changed example cannot reach one and not the
     # other.  Each ends at the next heading: two spaces and a letter for a
