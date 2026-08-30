@@ -290,14 +290,37 @@ things came out of it, and all three matter:
   **fresh request**, since the URL moves when the engine is replaced. An HTTP
   4xx/5xx is *not* retried — it is the engine's considered answer, and that is
   how the GPU probe learns the GPU cannot synthesise.
-* `render_stream` drains with `future.result(timeout=stall_seconds)` and, on
-  timeout, calls `engine.restart_backend()`. **Replacing the engine process is
-  the only thing that makes a wedged socket read fail**; nothing in the client
-  can break it from this side.
+* **Replacing the engine process is the only thing that makes a wedged socket
+  read fail**; nothing in the client can break it from this side. So
+  `render_stream` calls `engine.restart_backend()` and the sentence is retried
+  rather than lost.
 * The pool is shut down with `wait=False, cancel_futures=True`. With
   `wait=True` — which `with ThreadPoolExecutor(...)` does — the exit blocks on
   the stuck worker, which is why Ctrl-C did nothing and the run needed
   `kill -9`.
+
+**The wedge is found by watching the engine, not the clock.** The first version
+waited out `--tts-stall`, and a *second* run of the same book showed what that
+costs: four more wedges, each burning the full five minutes before anything
+moved — **22 of an 86-minute run** spent waiting for a timeout to expire on a
+process that was doing nothing. It is not slow, it is *stopped*, and nothing
+the HTTP API can be asked will say so — `/version` answers in 5 ms throughout.
+
+So `drain()` polls instead of blocking, and asks `cpu_seconds()`: an engine
+that has burned under `_IDLE_CORES` (0.05) of one core for `--tts-idle` seconds
+while sentences are outstanding is wedged. Measured on a real engine, **0.002
+cores idle against 11.27 synthesising**, so the threshold is nowhere near a
+close call and no plausible work reads as a wedge. `--tts-stall` stays as the
+backstop, and is the *only* detector where CPU cannot be read: Piper is
+in-process and a `--tts-url` engine has no pid here, so both answer `None` and
+keep the old behaviour exactly.
+
+Two details that are easy to get wrong. `/proc/<pid>/stat` puts `comm` in
+parentheses and it may contain more of them, so the fixed-width fields start
+after the **last** `)` — and a test name ending `))` hides the bug, because the
+wrong split lands on the same token by luck. And the replacement process counts
+its CPU from zero, so the idle window must restart with it or the drop reads as
+a fresh stall.
 
 **`--jobs` defaults to one per core** (`TtsOptions.jobs = 0` means auto) and is
 no longer passed to the engine as `--cpu_num_threads`: it meant two different

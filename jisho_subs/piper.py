@@ -170,6 +170,15 @@ class Engine:
         """Nothing to restart: the model runs in this process."""
         return False
 
+    def cpu_seconds(self) -> Optional[float]:
+        """No child, so no idleness to measure — and none to find.
+
+        The model runs on the calling thread: when it is working, so are we.
+        None keeps the caller on its timeout, which is the right answer for an
+        engine that cannot wedge and could not be replaced if it did.
+        """
+        return None
+
     def styles(self) -> List[Style]:
         speakers = getattr(self._voice.config, "num_speakers", 1) or 1
         if speakers <= 1:

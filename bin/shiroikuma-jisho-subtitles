@@ -209,8 +209,17 @@ ${C}READING A BOOK ALOUD${R}  ${C}(--tts)${R}
     answering while the engine stays healthy — on one 8,460-sentence book four
     in-flight requests went unanswered after 1,214 sentences, on sockets that
     stayed established and silent, and the run hung for 35 minutes.  Nothing
-    but replacing the engine frees those reads, so that is what happens after
-    ${C}--tts-stall${R} seconds, and the sentence is retried rather than lost.
+    but replacing the engine frees those reads, so that is what happens, and
+    the sentence is retried rather than lost.
+
+    ${B}The wedge is caught by watching the engine, not the clock.${R}  It is idle,
+    not slow: no CPU at all, while real synthesis runs at about ten cores.  So
+    ${C}--tts-idle${R} seconds of an engine doing nothing with sentences outstanding
+    is enough to replace it.  ${C}--tts-stall${R} is the backstop underneath, for an
+    engine whose CPU cannot be read — Piper, which runs in this process, or a
+    server started elsewhere and reached through ${C}--tts-url${R}.  A later run of
+    that same book wedged four more times; on the clock alone it spent 22 of
+    its 86 minutes waiting out timeouts.
 
     ${B}German is a different argument, and a weaker one.${R}  VOICEVOX won Japanese
     on ${B}correctness${R} — a real accent dictionary against models that guess.
@@ -454,7 +463,11 @@ ${C}OPTIONS${R}
                           ${D}paragraph and heading breaks get more)${R}
     ${C}--tts-track-minutes${R} N  target length for ${C}--tts-split time${R} ${D}(default: 30)${R}
     ${C}--tts-stall${R} SECONDS   replace the engine when a sentence goes unanswered
-                          for this long ${D}(default: 300)${R}
+                          for this long ${D}(default: 300 — the backstop, for an${R}
+                          ${D}engine whose CPU cannot be read)${R}
+    ${C}--tts-idle${R} SECONDS    replace the engine when it uses no CPU at all for
+                          this long ${D}(default: 20 — a wedge leaves the engine${R}
+                          ${D}idle rather than slow, so this is what catches it)${R}
     ${C}--tts-format${R} m4b|wav  ${D}(default: m4b — the app cannot seek anything else
                           reliably, and WAV is for checking the raw output)${R}
     ${C}--tts-engine${R} DIR      an unpacked vv-engine directory, if the engine is

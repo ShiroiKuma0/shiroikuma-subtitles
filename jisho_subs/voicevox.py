@@ -180,6 +180,18 @@ class Engine:
         self.base_url = self.process.base_url
         return True
 
+    def cpu_seconds(self) -> Optional[float]:
+        """CPU the engine has burned so far; None when this client cannot say.
+
+        This is the wedge's tell.  A wedged engine is not *slow*, it is
+        *stopped* — and every question the HTTP API can be asked says it is
+        fine, because ``/version`` still answers in 5 ms.  Only the CPU
+        disagrees, so it is read from the process rather than from the engine.
+        """
+        if self.process is None:
+            return None
+        return self.process.cpu_seconds()
+
     # -- transport --
 
     def _request(self, path: str, payload=None, method: Optional[str] = None,
@@ -381,6 +393,29 @@ class EngineProcess:
     @property
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
+
+    def cpu_seconds(self) -> Optional[float]:
+        """utime + stime of the child, in seconds, or None if unreadable.
+
+        Linux-only deliberately: ``/proc`` is where the answer is, and where
+        there is no ``/proc`` the caller falls back to its timeout rather than
+        pretending to know.
+        """
+        proc = self.proc
+        if proc is None:
+            return None
+        try:
+            with open(f"/proc/{proc.pid}/stat", "rb") as fh:
+                raw = fh.read()
+            # comm is parenthesised and may itself contain spaces and
+            # parentheses, so the fixed-width fields start after the *last* ')'
+            # — splitting on the first one reads a process named "vv (run)"
+            # wrong.  From there: state, ppid, ... utime is [11], stime [12].
+            fields = raw[raw.rindex(b")") + 2:].split()
+            ticks = int(fields[11]) + int(fields[12])
+        except (OSError, ValueError, IndexError):
+            return None
+        return ticks / os.sysconf("SC_CLK_TCK")
 
     def start(self) -> None:
         os.makedirs(self.data_home, exist_ok=True)

@@ -44,6 +44,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -109,10 +110,18 @@ class TtsOptions:
     fmt: str = "m4b"                  #: m4b | wav
     bitrate: str = "64k"
     jobs: int = 0                     #: 0 = one worker per core
-    #: How long one sentence may go unanswered before the engine is presumed
-    #: wedged.  Generous — the slowest real sentence measured is a couple of
-    #: seconds, and a needless restart costs about a minute.
+    #: The backstop: how long one sentence may go unanswered before the engine
+    #: is presumed wedged.  Generous, because silence is all it has to judge on
+    #: — the slowest real sentence measured is a couple of seconds, and a
+    #: needless restart costs about a minute.
     stall_seconds: float = 300.0
+    #: The fast path, for an engine that can report its own CPU.  A wedge does
+    #: not slow the engine down, it stops it: sockets established, queues
+    #: empty, no work at all, while real synthesis here runs at about ten
+    #: cores.  Twenty seconds of that with sentences outstanding is not a slow
+    #: sentence, and waiting out `stall_seconds` to say so cost one measured
+    #: run a quarter of its wall clock.
+    idle_seconds: float = 20.0
     language: str = "ja"
 
     @property
@@ -268,6 +277,32 @@ def plan_chapters(sentences: List[Sentence], opts: TtsOptions) -> Optional[List[
 
 # -- synthesis -----------------------------------------------------------
 
+#: Fraction of one core below which the engine counts as doing nothing.  Not
+#: zero: an engine answering nothing is not quite still, and the wedged one
+#: ticked over at 0.004 cores of background bookkeeping.  Measured against a
+#: real engine — 0.002 cores sitting idle, 11.27 while synthesising — so this
+#: sits three orders of magnitude clear of real work in one direction and an
+#: order clear of idling in the other.  The exact figure does not matter.
+_IDLE_CORES = 0.05
+
+
+def _engine_cpu(engine) -> Optional[float]:
+    """The engine's CPU seconds where it can say, None where it cannot.
+
+    Optional on purpose.  The engine contract is `speak` and `reading_of`; one
+    that cannot answer this — Piper, which is in-process, or a server this run
+    did not start and therefore has no pid for — simply leaves the caller on
+    its timeout.
+    """
+    ask = getattr(engine, "cpu_seconds", None)
+    if ask is None:
+        return None
+    try:
+        return ask()
+    except Exception:                      # a diagnostic must never take the run down
+        return None
+
+
 @dataclass
 class Clip:
     sentence: Sentence
@@ -306,23 +341,64 @@ def render_stream(engine: Engine, policy: ReadingPolicy,
     and the run hung for 35 minutes until it was killed.  **Replacing the
     engine is the only thing that makes those reads fail**, so that is what
     happens here.
+
+    That it used no CPU is not just a symptom, it is the *detector*: see
+    :func:`drain`, which asks whether the engine is working rather than how
+    long it has been silent.
     """
     log = log or (lambda *a: None)
     workers = opts.workers
     window = max(2, workers * 3)
 
     def drain(index: int, fut) -> Clip:
-        try:
-            return fut.result(timeout=opts.stall_seconds)
-        except FutureTimeout:
-            log(f"  nothing back for {opts.stall_seconds:.0f}s — replacing the engine")
-            if engine.restart_backend():
-                try:
-                    return fut.result(timeout=opts.stall_seconds)
-                except FutureTimeout:
-                    pass
-            return Clip(sentences[index], index, None,
-                        "the engine stopped answering")
+        """Wait for one sentence, replacing an engine that has stopped working.
+
+        Two questions, not one.  *Has it gone quiet* is `stall_seconds`, and on
+        an in-process engine it is the only question available.  *Is it doing
+        anything* is `cpu_seconds()`, and it is answered in seconds rather than
+        minutes, because the wedge leaves the engine idle rather than slow.
+        Measured on an 8,460-sentence book: four wedges, each costing the full
+        five-minute timeout, twenty-two minutes of an eighty-six minute run
+        spent waiting for a clock to run out on a process using no CPU.
+        """
+        # Short enough that neither limit overshoots by more than a
+        # quarter: a 0.5s stall_seconds in a test must not wait 2s.
+        poll = max(0.05, min(2.0, opts.idle_seconds / 4.0,
+                             opts.stall_seconds / 4.0))
+        restarted = False
+        deadline = time.monotonic() + opts.stall_seconds
+        idle_since: Optional[float] = None
+        idle_cpu = 0.0
+        while True:
+            try:
+                return fut.result(timeout=poll)
+            except FutureTimeout:
+                pass
+            now = time.monotonic()
+            cpu = _engine_cpu(engine)
+            if cpu is None:
+                idle_since = None              # it cannot say; the clock decides
+            elif idle_since is None:
+                idle_since, idle_cpu = now, cpu
+            elif cpu - idle_cpu > _IDLE_CORES * (now - idle_since):
+                idle_since = None              # it is doing real work
+            idle = 0.0 if idle_since is None else now - idle_since
+            if idle < opts.idle_seconds and now < deadline:
+                continue
+            if restarted:
+                return Clip(sentences[index], index, None,
+                            "the engine stopped answering")
+            log("  " + (f"the engine has been idle {idle:.0f}s"
+                        if idle >= opts.idle_seconds else
+                        f"nothing back for {opts.stall_seconds:.0f}s")
+                + " — replacing the engine")
+            if not engine.restart_backend():
+                return Clip(sentences[index], index, None,
+                            "the engine stopped answering")
+            # The replacement counts its CPU from zero, so the window restarts
+            # with it rather than reading the drop as a stall.
+            restarted, idle_since = True, None
+            deadline = time.monotonic() + opts.stall_seconds
 
     pool = ThreadPoolExecutor(max_workers=workers)
     pending: deque = deque()

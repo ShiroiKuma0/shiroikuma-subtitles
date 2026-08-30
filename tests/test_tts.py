@@ -498,6 +498,167 @@ def test_a_stall_that_survives_the_restart_is_reported_not_hung(tmp_path):
     assert stats.failures and "stopped answering" in stats.failures[0][1]
 
 
+def test_an_idle_engine_is_replaced_without_waiting_out_the_timeout(tmp_path):
+    """A wedge is idle, not slow, so it need not be waited for.
+
+    Measured on the second run of the same 8,460-sentence book: four wedges,
+    each costing the full five-minute `stall_seconds` before anything moved —
+    22 minutes of an 86-minute run spent watching a process that was using no
+    CPU.  Asking the engine what it is doing answers in seconds.
+    """
+    import threading
+    import time
+
+    class Idle(FakeEngine):
+        def __init__(self):
+            super().__init__()
+            self.gate = threading.Event()
+            self.restarts = 0
+            self.stall_once = True
+
+        def cpu_seconds(self):
+            return 1.0                      # never moves: it is doing nothing
+
+        def speak(self, text, speaker, **kw):
+            if self.stall_once:
+                self.stall_once = False
+                self.gate.wait(60)          # only a restart lets this through
+            return super().speak(text, speaker, **kw)
+
+        def restart_backend(self):
+            self.restarts += 1
+            self.gate.set()
+            return True
+
+    engine = Idle()
+    opts = tts_mod.TtsOptions(gap=0.0, fmt="wav", jobs=2, idle_seconds=0.4,
+                              stall_seconds=600.0, track_seconds=10_000,
+                              split="time")
+    began = time.monotonic()
+    stats = tts_mod.speak_book(engine, _distinct(4), str(tmp_path), "book", opts)
+    took = time.monotonic() - began
+
+    assert engine.restarts >= 1, "it never replaced the engine"
+    assert stats.sentences == 4, "a wedge must not cost the sentence"
+    assert took < 10.0, f"it waited on the clock, not the engine ({took:.1f}s)"
+
+
+def test_an_engine_that_is_working_is_left_alone_however_slow(tmp_path):
+    """The other half: work must not read as a wedge.
+
+    Without the CPU check this sentence — three times `idle_seconds` — would
+    be taken for a stall, and a needless restart costs about a minute.
+    """
+    import time
+
+    class Slow(FakeEngine):
+        def __init__(self):
+            super().__init__()
+            self.restarts = 0
+            self.began = time.monotonic()
+
+        def cpu_seconds(self):
+            return (time.monotonic() - self.began) * 4.0     # four busy cores
+
+        def speak(self, text, speaker, **kw):
+            time.sleep(0.9)
+            return super().speak(text, speaker, **kw)
+
+        def restart_backend(self):                # pragma: no cover - the bug
+            self.restarts += 1
+            return True
+
+    engine = Slow()
+    opts = tts_mod.TtsOptions(gap=0.0, fmt="wav", jobs=1, idle_seconds=0.3,
+                              stall_seconds=600.0, track_seconds=10_000,
+                              split="time")
+    stats = tts_mod.speak_book(engine, _distinct(2), str(tmp_path), "book", opts)
+
+    assert engine.restarts == 0, "it replaced an engine that was synthesising"
+    assert stats.sentences == 2
+
+
+def test_an_engine_that_cannot_report_its_cpu_still_gets_the_timeout(tmp_path):
+    """Piper is in-process and a `--tts-url` engine has no pid here, so both
+    answer None.  That must leave the old behaviour exactly as it was, not
+    disable the watchdog."""
+    import time
+
+    class Mute(FakeEngine):
+        def cpu_seconds(self):
+            return None
+
+        def speak(self, text, speaker, **kw):
+            time.sleep(30)
+
+        def restart_backend(self):
+            return False
+
+    opts = tts_mod.TtsOptions(gap=0.0, fmt="wav", jobs=1, idle_seconds=0.2,
+                              stall_seconds=0.4, track_seconds=10_000,
+                              split="time")
+    began = time.monotonic()
+    stats = tts_mod.speak_book(Mute(), _distinct(1), str(tmp_path), "book", opts)
+    took = time.monotonic() - began
+
+    assert stats.sentences == 0
+    assert stats.failures and "stopped answering" in stats.failures[0][1]
+    assert took >= 0.4, "it gave up before the timeout it had to fall back on"
+
+
+def test_the_childs_cpu_is_read_through_a_parenthesised_name(tmp_path):
+    """`/proc/<pid>/stat` puts comm in parentheses and it may hold more of
+    them, so the fixed-width fields start after the *last* ')'.  Splitting on
+    the first shifts every field by one and reads page faults as CPU.
+
+    The busy process is named `vv (run) core` rather than `vv (run)`: with the
+    parenthesis last, comm ends `))` and the wrong split lands on the same
+    token by luck, so the trap is invisible.  It also spins in the kernel, so
+    a parse that slides onto utime alone reads it as nearly idle."""
+    import shutil
+    import subprocess
+    import time
+
+    from jisho_subs import voicevox as vv
+
+    if not os.path.isdir("/proc/self"):
+        pytest.skip("no /proc on this system")
+    dd, sleep = shutil.which("dd"), shutil.which("sleep")
+    if not (dd and sleep):
+        pytest.skip("needs dd and sleep")
+
+    spinner = tmp_path / "vv (run) core"
+    shutil.copy(dd, spinner)
+    os.chmod(spinner, 0o755)
+
+    process = vv.EngineProcess("/nonexistent/run")     # nothing is started
+    assert process.cpu_seconds() is None, "it invented a figure with no child"
+
+    busy = subprocess.Popen([str(spinner), "if=/dev/zero", "of=/dev/null"],
+                            stderr=subprocess.DEVNULL)
+    idle = subprocess.Popen([sleep, "10"])
+    try:
+        process.proc = busy
+        busy_a = process.cpu_seconds()
+        process.proc = idle
+        idle_a = process.cpu_seconds()
+        time.sleep(1.0)
+        process.proc = busy
+        busy_b = process.cpu_seconds()
+        process.proc = idle
+        idle_b = process.cpu_seconds()
+    finally:
+        for p in (busy, idle):
+            p.kill()
+            p.wait()
+
+    assert None not in (busy_a, busy_b, idle_a, idle_b), "the CPU was unreadable"
+    assert busy_b - busy_a > 0.5, \
+        f"a spinning `vv (run) core` read as idle ({busy_b - busy_a:.3f}s in 1s)"
+    assert idle_b - idle_a < 0.1, \
+        f"a sleeping process read as busy ({idle_b - idle_a:.3f}s in 1s)"
+
+
 # -- defaults and estimates ----------------------------------------------
 
 def test_workers_default_to_one_per_core():

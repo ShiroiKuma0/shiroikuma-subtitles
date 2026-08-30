@@ -482,6 +482,7 @@ def cmd_tts(args) -> int:
         min_chapter_chars=args.tts_min_chapter,
         ruby=args.tts_ruby, fmt=args.tts_format,
         jobs=args.jobs or 0, stall_seconds=args.tts_stall,
+        idle_seconds=args.tts_idle,
         language=lang)
 
     normalise = german.normalise if lang.startswith("de") else None
@@ -1145,6 +1146,10 @@ examples:
                         metavar="SECONDS",
                         help="replace the engine when a sentence goes "
                              "unanswered this long (default: 300)")
+    speech.add_argument("--tts-idle", type=float, default=20.0,
+                        metavar="SECONDS",
+                        help="replace the engine when it uses no CPU for this "
+                             "long with sentences outstanding (default: 20)")
     speech.add_argument("--tts-engine", metavar="DIR",
                         help="path to an unpacked vv-engine directory")
     speech.add_argument("--tts-url", metavar="URL",
