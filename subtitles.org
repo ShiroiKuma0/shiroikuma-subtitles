@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.0.0 - description
+* subtitles - version 1.1.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -62,21 +62,36 @@ builds subtitles from the dub's own word timestamps.
 
 ** Usage
 #+begin_example
-subtitles.sh [options] AUDIO-OR-VIDEO
-  -h            help
-  -l LANG       language code (default ja)
-  -r REF.srt    reference subtitles with usable timings (optional)
-  -n NAMES      character names for the prompt, comma-separated;
-                a name may carry variants to normalise: 正=誤1|誤2
-  -m MODEL      Whisper model (default large-v3)
-  -a N          audio stream index inside a container (default 0)
-  -o OUT.srt    output (default: INPUT-basename.LANG.srt beside the input)
+subtitles.sh [options] INPUT            INPUT: any audio or video file ffmpeg reads
+  -h            this help
+  -l LANG       language of the dub (default ja); see -p language
+  -r REF.srt    reference subtitles with usable timings (default none: VAD only)
+  -s SECONDS    shift REF.srt by this much before use (default 0); see -p timeline
+  -n NAMES      character names for the prompt, comma-separated (default none:
+                single unprompted pass); a name may carry variants to normalise:
+                正=誤1|誤2 ; see -p names
+  -m MODEL      Whisper model (default large-v3); see -p models
+  -a N          audio stream index inside a container (default 0); see -p streams
+  -o OUT.srt    output (default INPUT-basename.LANG.srt beside the input)
   -w DIR        work dir with the cache (default /tmp/subtitles/BASENAME)
   -f            force re-transcription, ignore cached passes
   -M OUT.mkv    additionally mux the SRT into the input MKV as a new track
+  -p PROBE      probe instead of transcribing, to choose the options above:
+                streams   list the audio streams of INPUT (for -a)
+                timeline  offset between REF.srt and the speech in the audio (for -s)
+                regions   how well REF.srt covers the speech; region statistics
+                language  Whisper language detection on a sample (for -l)
+                models    sample-transcribe with several models: speed, confidence,
+                          hallucinations, text (for -m); models from -L
+                names     candidate character names from a sample transcription (for -n)
+                all       every probe except models
+  -S N          sample regions for the probes (default 12)
+  -L MODELS     models tried by -p models (default turbo,large-v3,medium)
 #+end_example
 Example — the first film:
 #+begin_example
+subtitles.sh -p timeline -r japanese-wrong.srt thin-red-line.aac     # 0.0 s → same timeline
+subtitles.sh -p models -r japanese-wrong.srt thin-red-line.aac       # pick -m
 subtitles.sh -l ja -r japanese-wrong.srt \
   -n "ウィット=ウイット|ウィッツ,ウェルシュ=ウエルシュ,スタロス,トール,ベル,ケック,ファイフ=ファイブ,ドール,ギャフ=ガフ,ストーム,マーティ,クインタード=クインタート" \
   thin-red-line.aac
@@ -103,6 +118,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
 - The Whisper model (large-v3, 2.9 GB) is downloaded on first use into =~/.cache/whisper=.
 
 * Changelog
+** 1.1.0
+*** 2026-09-17_06-43-52 UTC (木曜日)
+**** Probes (-p streams|timeline|regions|language|models|names|all, -S, -L), reference shift -s, full -h, defaults for every option; source files regrouped under one heading and split finer by functionality.
 ** 1.0.0
 *** 2026-09-16_19-48-59 UTC (水曜日)
 **** Initial version: cue+VAD regions, two-pass Whisper large-v3 with per-region merge, hallucination filters, word-timestamp subtitle builder with cue snapping, coverage report, optional mkvmerge step.
@@ -114,48 +132,68 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 
 You should have received a copy of the GNU General Public License along with this program; if not, write to the Free Software Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 
-* subtitles-whisper.py
+* Source files
+:PROPERTIES:
+:VISIBILITY: children
+:END:
+Each file is one sub-heading carrying its own tangle target in
+=:header-args:=; everything below that sub-heading is concatenated in
+document order into the file.  Nothing outside "Source files" tangles.
+
+** subtitles-whisper.py
 :PROPERTIES:
 :VISIBILITY: children
 :header-args: :mkdirp yes :tangle ~/0/bin/subtitles-whisper.py :shebang "#!/usr/bin/env python3"
 :END:
-The Python half: everything after the audio has been decoded.  Run by
-=subtitles.sh= inside the Whisper venv; =whisper= and =silero_vad= are
-imported lazily so that =--help= works anywhere.
-** Docstring and imports
+The Python half: everything after the audio has been decoded, plus
+the probes.  Run by =subtitles.sh= inside the Whisper venv; =whisper=,
+=torch= and =silero_vad= are imported lazily so that =--help= works
+anywhere.
+*** Docstring and imports
 #+begin_src python
 """
 subtitles-whisper: transcribe a dubbed soundtrack into subtitles with Whisper,
 guided by a reference SRT whose timings are right and whose text is not.
 
-    subtitles-whisper.py run --audio A.wav --lang ja [--ref REF.srt] [--names ...]
-                             [--model large-v3] --work DIR --out OUT.srt --report REPORT.txt [--force]
+  run   --audio A.wav --lang ja [--ref REF.srt] [--shift S] [--names ...] [--model M]
+        --work DIR --out OUT.srt --report REPORT.txt [--force]
+  probe --what timeline|regions|language|models|names|all --audio A.wav [--ref REF.srt]
+        [--shift S] [--lang ja] [--model M] [--models a,b,c] [--samples N] --work DIR
 """
 import argparse, bisect, json, os, re, sys, time
 import numpy as np
 #+end_src
-** Parameters
-Everything tunable in one place.  Per-language values: maximum line
-length, whether words join with or without spaces, the hallucination
-phrases Whisper is known to produce for that language.
+*** Parameters
+**** Pipeline constants
+Region building, subtitle timing and the review threshold, in one
+place.  Times in seconds.
 #+begin_src python
 PAD_BEFORE, PAD_AFTER, MERGE_GAP, MAX_REGION = 0.4, 0.6, 1.0, 60.0
-VAD_MIN_OUTSIDE = 0.6            # VAD chunk outside the cues worth adding (s)
+VAD_MIN_OUTSIDE = 0.6            # VAD chunk outside the cues worth adding
 LEAD, LINGER, MIN_DUR, MAX_DUR, GAP, SNAP = 0.10, 0.45, 1.2, 7.0, 0.08, 0.30
-PAUSE_SPLIT = 0.7                # a pause this long ends a subtitle unit (s)
+PAUSE_SPLIT = 0.7                # a pause this long ends a subtitle unit
 LOW_CONF = -0.8                  # avg logprob below this is listed for review
-
+#+end_src
+**** Per-language table
+Maximum line length, whether words join with spaces, which punctuation
+ends a sentence, what to strip from line ends, the hallucination
+phrases Whisper is known to produce for the language, and how a name
+list is turned into a prompt.  Unknown languages get the "_" entry.
+#+begin_src python
 LANG = {
-    "ja": dict(maxline=16, spaces=False, punct_end="。！？!?", strip_end="。",
+    "ja": dict(maxline=16, spaces=False, punct_end="。！？!?", strip_end="。", sep="、", stop="。",
                hallu=["ご視聴ありがとう", "チャンネル登録", "字幕", "おやすみなさい",
-                      "ご覧いただ", "次回", "最後まで", "吹き替え", "登場人物", "映画の映像"]),
-    "_":  dict(maxline=42, spaces=True, punct_end=".!?", strip_end="",
+                      "ご覧いただ", "次回", "最後まで", "吹き替え", "登場人物", "映画の映像"],
+               name_re=r"[ァ-ヴー]{2,}"),
+    "_":  dict(maxline=42, spaces=True, punct_end=".!?", strip_end="", sep=", ", stop=".",
                hallu=["Thanks for watching", "Thank you for watching", "Subtitles by",
-                      "Amara.org", "Subscribe", "Like and subscribe"]),
+                      "Amara.org", "Subscribe", "Like and subscribe"],
+               name_re=r"(?<![.!?]\s)(?<!^)\b[A-Z][a-z]{2,}\b"),
 }
 def lang_cfg(lang): return LANG.get(lang, LANG["_"])
 #+end_src
-** SRT reading and writing
+*** SRT reading and writing
+**** Time codes
 #+begin_src python
 def srt_time(s):
     h, m, rest = s.strip().split(":"); sec, ms = rest.split(",")
@@ -165,8 +203,15 @@ def fmt_time(t):
     ms = int(round(t*1000))
     return "%02d:%02d:%02d,%03d" % (ms//3600000, (ms//60000) % 60, (ms//1000) % 60, ms % 1000)
 
-def read_srt(path):
-    """-> list of (start, end, text) ; positioning tags like {\\an8} are dropped"""
+def hms(s): return "%d:%02d:%05.2f" % (s//3600, (s % 3600)//60, s % 60)
+#+end_src
+**** Files
+Positioning tags such as ={\an8}= are dropped on reading; =shift= moves
+every cue (positive = later), which is how a reference on another
+timeline is brought onto the audio's.
+#+begin_src python
+def read_srt(path, shift=0.0):
+    """-> list of (start, end, text)"""
     txt = open(path, encoding="utf-8-sig", errors="replace").read()
     out = []
     for b in re.split(r"\n\s*\n", txt.strip()):
@@ -174,19 +219,17 @@ def read_srt(path):
         if len(lines) < 2 or "-->" not in lines[1]: continue
         a, c = lines[1].split("-->")
         text = re.sub(r"\{\\an\d\}", "", "\n".join(lines[2:])).strip()
-        out.append((srt_time(a), srt_time(c), text))
-    return out
+        out.append((srt_time(a)+shift, srt_time(c)+shift, text))
+    return [c for c in out if c[1] > 0]
 
 def write_srt(path, cues):
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join("%d\n%s --> %s\n%s\n" % (i, fmt_time(s), fmt_time(e), t)
                           for i, (s, e, t) in enumerate(cues, 1)))
 #+end_src
-** Speech regions: reference cues ∪ VAD
-The VAD runs once over the whole track and is cached.  Regions are the
-padded cues, plus VAD speech that no padded cue covers, merged across
-short gaps, and split at the largest internal cue gap when longer than
-=MAX_REGION= (Whisper works in 30-s windows; a minute is plenty).
+*** Speech regions
+**** Voice activity detection
+Silero VAD over the whole track, once, cached in the work dir.
 #+begin_src python
 def run_vad(x, sr, cache):
     if os.path.exists(cache): return json.load(open(cache))
@@ -198,36 +241,67 @@ def run_vad(x, sr, cache):
     vad = [(d["start"]/sr, d["end"]/sr) for d in ts]
     json.dump(vad, open(cache, "w"))
     return vad
+#+end_src
+**** Region assembly
+The padded reference cues, plus VAD speech that no padded cue covers,
+merged across gaps of ≤ =MERGE_GAP=.  Without cues the VAD alone.
+#+begin_src python
+def outside_cues(cues, vad, total):
+    cov = np.zeros(int(total)+2)
+    for s, e, _ in cues: cov[max(0, int(s-PAD_BEFORE)):int(e+PAD_AFTER)+1] = 1
+    return [(s, e) for s, e in vad if cov[int(s)] == 0 and cov[int(e)] == 0 and e-s >= VAD_MIN_OUTSIDE]
 
 def build_regions(cues, vad, total):
     iv = [(max(0, s-PAD_BEFORE), min(total, e+PAD_AFTER)) for s, e, _ in cues]
-    cov = np.zeros(int(total)+2)
-    for s, e in iv: cov[int(s):int(e)+1] = 1
-    iv += [(max(0, s-0.3), min(total, e+0.3)) for s, e in vad
-           if cov[int(s)] == 0 and cov[int(e)] == 0 and e-s >= VAD_MIN_OUTSIDE]
+    iv += [(max(0, s-0.3), min(total, e+0.3)) for s, e in outside_cues(cues, vad, total)]
     iv.sort(); regions = []
     for s, e in iv:
         if regions and s - regions[-1][1] <= MERGE_GAP: regions[-1][1] = max(regions[-1][1], e)
         else: regions.append([s, e])
-    def split_long(r):
-        s, e = r
-        if e-s <= MAX_REGION: return [r]
-        inner = sorted(c[:2] for c in cues if s < c[0] and c[1] < e) or sorted(v for v in vad if s < v[0] and v[1] < e)
-        gaps = [(inner[i+1][0]-inner[i][1], (inner[i][1]+inner[i+1][0])/2) for i in range(len(inner)-1)]
-        if not gaps: return [r]
-        g, m = max(gaps)
-        return split_long([s, m]) + split_long([m, e])
-    return [r for reg in regions for r in split_long(reg)]
+    return [r for reg in regions for r in split_long(reg, cues, vad)]
 #+end_src
-** Transcription (one pass)
+**** Splitting long regions
+Whisper works in 30-s windows; a region longer than =MAX_REGION= is cut
+at its largest internal gap between cues (or VAD chunks).
+#+begin_src python
+def split_long(r, cues, vad):
+    s, e = r
+    if e-s <= MAX_REGION: return [r]
+    inner = sorted(c[:2] for c in cues if s < c[0] and c[1] < e) or sorted(v for v in vad if s < v[0] and v[1] < e)
+    gaps = [(inner[i+1][0]-inner[i][1], (inner[i][1]+inner[i+1][0])/2) for i in range(len(inner)-1)]
+    if not gaps: return [r]
+    g, m = max(gaps)
+    return split_long([s, m], cues, vad) + split_long([m, e], cues, vad)
+#+end_src
+*** Transcription
+**** Sample selection
+The probes work on a sample: =n= regions of at least 8 s, spread
+evenly over the film (all regions if there are fewer).
+#+begin_src python
+def sample_regions(regions, n):
+    cand = [r for r in regions if r[1]-r[0] >= 8] or regions
+    if len(cand) <= n: return cand
+    return [cand[int(i*len(cand)/n)] for i in range(n)]
+#+end_src
+**** Loading a model
+#+begin_src python
+def load_model(name):
+    import whisper
+    return whisper.load_model(name, device="cuda")
+
+def unload_model(model):
+    import torch
+    del model; torch.cuda.empty_cache()
+#+end_src
+**** One pass over regions
 One Whisper call per region; the region's start is added back to every
-segment and word time.  Results are cached per pass so that the
+segment and word time.  The result is cached per pass so that the
 subtitle-building parameters can be re-tuned without re-transcribing.
 #+begin_src python
-def transcribe(x, sr, regions, lang, model_name, prompt, cache, force=False):
-    if os.path.exists(cache) and not force: return json.load(open(cache))
-    import whisper
-    model = whisper.load_model(model_name, device="cuda")
+def transcribe(x, sr, regions, lang, model_name, prompt, cache=None, force=False, model=None, quiet=False):
+    if cache and os.path.exists(cache) and not force: return json.load(open(cache))
+    own = model is None
+    if own: model = load_model(model_name)
     out = []; t0 = time.time()
     for k, (s, e) in enumerate(regions):
         r = model.transcribe(x[int(s*sr):int(e*sr)], language=lang, task="transcribe",
@@ -239,13 +313,14 @@ def transcribe(x, sr, regions, lang, model_name, prompt, cache, force=False):
                             compression_ratio=seg["compression_ratio"],
                             words=[dict(w=w["word"], start=s+w["start"], end=s+w["end"], p=w.get("probability", 0))
                                    for w in seg.get("words", [])]))
-        if k % 25 == 0 or k == len(regions)-1:
+        if not quiet and (k % 25 == 0 or k == len(regions)-1):
             print("  region %d/%d  t=%.0f s  segments %d  %.0f s elapsed" % (k+1, len(regions), s, len(out), time.time()-t0), flush=True)
-            json.dump(out, open(cache, "w"), ensure_ascii=False)
-    json.dump(out, open(cache, "w"), ensure_ascii=False)
+            if cache: json.dump(out, open(cache, "w"), ensure_ascii=False)
+    if cache: json.dump(out, open(cache, "w"), ensure_ascii=False)
+    if own: unload_model(model)
     return out
 #+end_src
-** Hallucination filter
+*** Hallucination filter
 A segment is dropped when Whisper itself flags it (no speech, or a
 repetition loop), when it is a known outro phrase, or when it echoes
 the name prompt (as a whole or by 4-gram overlap).
@@ -264,11 +339,9 @@ def bad_reason(seg, cfg, prompt):
         if len(ts_) >= 6 and sum(1 for i in range(len(ts_)-3) if ts_[i:i+4] in ps)/(len(ts_)-3) > 0.7: return "prompt-echo"
     return None
 #+end_src
-** Merging the two passes
-For every region, the prompted pass wins only when it has no dropped
-segment and covers the VAD speech of that region at least as well as
-the unprompted pass; otherwise the unprompted pass is used.  Then the
-name variants are normalised.
+*** Merging the two passes
+**** Coverage of VAD speech
+How much of the VAD speech inside a region the segments cover.
 #+begin_src python
 def coverage(segs, rs, re_, vad):
     cov = np.zeros(int((re_-rs)*20)+2)
@@ -280,7 +353,13 @@ def coverage(segs, rs, re_, vad):
         if n <= 0: continue
         tot += n; hit += cov[int((s-rs)*20):int((s-rs)*20)+n].sum()
     return hit/tot if tot else 1.0
-
+#+end_src
+**** Merge and name normalisation
+For every region the prompted pass wins only when it has no dropped
+segment and covers the VAD speech at least as well as the unprompted
+pass; otherwise the unprompted pass is used.  Then the name variants
+are replaced by their canonical spelling.
+#+begin_src python
 def merge_passes(A, B, regions, vad, cfg, prompt, names):
     out = []; used = dict(prompt=0, noprompt=0); dropped = []
     for k, (rs, re_) in enumerate(regions):
@@ -302,7 +381,8 @@ def merge_passes(A, B, regions, vad, cfg, prompt, names):
                     for w in s["words"]: w["w"] = w["w"].replace(v, canon)
     return out, used, dropped
 #+end_src
-** Subtitle units from word timestamps
+*** Subtitle building
+**** Units from word timestamps
 A unit ends at sentence punctuation, at a pause ≥ =PAUSE_SPLIT=, at a
 reference cue boundary that falls between two words, or when the text
 or duration cap is reached.
@@ -326,14 +406,19 @@ def make_units(segs, cues, cfg):
                 units.append(dict(words=list(cur), logprob=seg["avg_logprob"])); cur = []
     return units
 #+end_src
-** Timing, snapping and line breaking
+**** Snapping to reference cues
 #+begin_src python
 def nearest(t, arr):
     i = bisect.bisect_left(arr, t); best = None
     for j in (i-1, i):
         if 0 <= j < len(arr) and abs(arr[j]-t) <= SNAP and (best is None or abs(arr[j]-t) < abs(best-t)): best = arr[j]
     return best
-
+#+end_src
+**** Line breaking
+Two lines at most.  Latin scripts break at a space near the middle,
+preferring one after punctuation; Japanese breaks near the middle,
+preferring after punctuation, then after a particle.
+#+begin_src python
 def break_lines(t, cfg):
     t = t.strip(); n = cfg["maxline"]
     if len(t) <= n: return t
@@ -351,7 +436,12 @@ def break_lines(t, cfg):
         if best is None or score < best[0]: best = (score, i)
     i = best[1] if best else int(mid)
     return t[:i] + "\n" + t[i:]
-
+#+end_src
+**** Timing and assembly
+Lead-in and linger around the words, snapped to reference cue edges
+when within =SNAP=, minimum duration, tiny fragments glued onto the
+previous line, overlaps resolved.
+#+begin_src python
 def build_cues(units, cues, cfg):
     starts = sorted(c[0] for c in cues); ends = sorted(c[1] for c in cues); out = []
     for u in units:
@@ -367,7 +457,7 @@ def build_cues(units, cues, cfg):
         out.append(dict(start=st, end=en, text=text, logprob=u["logprob"]))
     out.sort(key=lambda c: c["start"])
     merged = []
-    for c in out:   # glue tiny fragments onto the previous line
+    for c in out:
         if merged and len(c["text"]) <= 3 and c["start"]-merged[-1]["end"] < 0.4 and len(merged[-1]["text"])+len(c["text"]) <= 2*cfg["maxline"]:
             merged[-1]["text"] += ("" if not cfg["spaces"] else " ") + c["text"]; merged[-1]["end"] = max(merged[-1]["end"], c["end"]); continue
         merged.append(c)
@@ -375,15 +465,17 @@ def build_cues(units, cues, cfg):
         if a["end"] > b["start"]-GAP: a["end"] = max(a["start"]+0.5, b["start"]-GAP)
     return [(c["start"], c["end"], break_lines(c["text"], cfg), c["logprob"]) for c in merged]
 #+end_src
-** Coverage check and review report
+*** Review report
+VAD speech left without a line, the lowest-confidence lines, and
+every dropped segment with its reason.
 #+begin_src python
-def hms(s): return "%d:%02d:%05.2f" % (s//3600, (s % 3600)//60, s % 60)
-
-def write_report(path, cues, vad, used, dropped, ref_count):
+def uncovered(cues, vad):
     cov = np.zeros(int(max([e for _, e, _, _ in cues] + [1])*10)+20)
     for s, e, _, _ in cues: cov[int(s*10):int(e*10)+1] = 1
-    miss = [(s, e) for s, e in vad if e-s >= 0.8 and int(e*10) < len(cov) and cov[int(s*10):int(e*10)].mean() < 0.3]
-    low = [c for c in cues if c[3] < LOW_CONF]
+    return [(s, e) for s, e in vad if e-s >= 0.8 and int(e*10) < len(cov) and cov[int(s*10):int(e*10)].mean() < 0.3]
+
+def write_report(path, cues, vad, used, dropped, ref_count):
+    miss = uncovered(cues, vad); low = [c for c in cues if c[3] < LOW_CONF]
     with open(path, "w", encoding="utf-8") as f:
         f.write("subtitles: %d cues written (reference had %d)\n" % (len(cues), ref_count))
         f.write("regions from the prompted pass: %d, from the unprompted pass: %d\n" % (used["prompt"], used["noprompt"]))
@@ -395,7 +487,94 @@ def write_report(path, cues, vad, used, dropped, ref_count):
         for seg, why in dropped: f.write("%s --> %s  [%s]  %s\n" % (fmt_time(seg["start"]), fmt_time(seg["end"]), why, seg["text"].strip()))
     return len(miss), len(low)
 #+end_src
-** Main entry point
+*** Probes
+Cheap experiments that tell which option values fit the film, run
+before the real transcription.
+**** timeline — is the reference SRT on the audio's timeline?
+Cross-correlates a 10 Hz "some cue is on" signal with the VAD's "someone
+speaks" signal over ±180 s.  A peak near 0 means the same timeline;
+otherwise the offset is what =-s= needs.
+#+begin_src python
+def probe_timeline(cues, vad, total):
+    if not cues: print("timeline: no reference SRT given (-r)"); return
+    n = int(total*10)+1; a = np.zeros(n); b = np.zeros(n)
+    for s, e, _ in cues: a[int(s*10):int(e*10)+1] = 1
+    for s, e in vad: b[int(s*10):int(e*10)+1] = 1
+    a -= a.mean(); b -= b.mean()
+    from scipy.signal import fftconvolve
+    corr = fftconvolve(b, a[::-1], mode="full")            # index n-1 <-> lag 0
+    lags = np.arange(-n+1, n)/10.0; sel = np.abs(lags) <= 180
+    c = corr[sel]; l = lags[sel]; i = int(np.argmax(c)); peak = c[i]/(np.sqrt((a**2).sum()*(b**2).sum())+1e-9)
+    print("timeline: best offset (audio speech minus reference cues) = %+.1f s, correlation %.2f" % (l[i], peak))
+    print("          first cue %s, first VAD speech %s" % (hms(cues[0][0]), hms(vad[0][0]) if vad else "-"))
+    if abs(l[i]) >= 0.3: print("          -> the reference is on another timeline: use  -s %+.1f" % l[i])
+    else: print("          -> same timeline, no -s needed")
+#+end_src
+**** regions — how well does the reference cover the speech?
+#+begin_src python
+def probe_regions(cues, vad, total):
+    out = outside_cues(cues, vad, total); regions = build_regions(cues, vad, total)
+    print("regions: audio %.1f min; VAD speech %.1f min in %d chunks; reference cues %d (%.1f min)"
+          % (total/60, sum(e-s for s, e in vad)/60, len(vad), len(cues), sum(e-s for s, e, _ in cues)/60))
+    print("         speech outside the padded cues: %d chunks, %.1f min%s"
+          % (len(out), sum(e-s for s, e in out)/60, "" if cues else " (no reference: everything)"))
+    for s, e in sorted(out, key=lambda r: r[0]-r[1])[:10]: print("            %s - %s (%.1f s)" % (hms(s), hms(e), e-s))
+    print("         -> %d regions to transcribe, %.1f min, longest %.0f s" % (len(regions), sum(e-s for s, e in regions)/60, max((e-s for s, e in regions), default=0)))
+#+end_src
+**** language — what does Whisper hear?
+Language detection on the first 30 s of each sample region, averaged.
+#+begin_src python
+def probe_language(x, sr, regions, model_name, n):
+    import whisper, torch
+    model = load_model(model_name); probs = {}
+    for s, e in sample_regions(regions, n):
+        mel = whisper.log_mel_spectrogram(whisper.pad_or_trim(x[int(s*sr):int(e*sr)]), n_mels=model.dims.n_mels).to(model.device)
+        _, p = model.detect_language(mel)
+        for k, v in p.items(): probs[k] = probs.get(k, 0) + v/n
+    top = sorted(probs.items(), key=lambda kv: -kv[1])[:5]
+    print("language: " + ", ".join("%s %.0f%%" % (k, 100*v) for k, v in top))
+    print("          -> use  -l %s" % top[0][0])
+    unload_model(model)
+#+end_src
+**** models — which model fits this film?
+Every model in the list transcribes the same sample (no prompt); per
+model: transcription speed (model loading excluded), mean confidence, share of low-confidence segments,
+segments the filter would drop, and the first lines of one sample so
+the text quality can be compared by eye.
+#+begin_src python
+def probe_models(x, sr, regions, lang, models, n, cfg):
+    sample = sample_regions(regions, n); mins = sum(e-s for s, e in sample)/60
+    print("models: %d sample regions, %.1f min of audio; models %s" % (len(sample), mins, ", ".join(models)))
+    print("  %-12s %8s %9s %9s %8s %7s" % ("model", "x realtime", "logprob", "low(<-0.8)", "dropped", "chars"))
+    texts = {}
+    for m in models:
+        try:
+            model = load_model(m); t0 = time.time()
+            segs = transcribe(x, sr, sample, lang, m, None, model=model, quiet=True); dt = time.time()-t0
+            unload_model(model)
+        except Exception as ex: print("  %-12s failed: %s" % (m, ex)); continue
+        lp = [s["avg_logprob"] for s in segs] or [0]
+        low = sum(1 for v in lp if v < LOW_CONF)/len(lp); drop = sum(1 for s in segs if bad_reason(s, cfg, None))
+        print("  %-12s %8.1fx %9.2f %8.0f%% %8d %7d" % (m, mins*60/dt, sum(lp)/len(lp), 100*low, drop, sum(len(s["text"].strip()) for s in segs)))
+        texts[m] = [s for s in segs if s["region"] == 0][:3]
+    for m, segs in texts.items():
+        print("  %s: " % m + " / ".join(s["text"].strip() for s in segs))
+    print("  -> higher logprob and fewer low/dropped at acceptable speed: that is your -m")
+#+end_src
+**** names — which names does the dub use?
+Candidate names from a sample transcription: katakana runs for
+Japanese, capitalised non-initial words for Latin scripts, by count.
+#+begin_src python
+def probe_names(x, sr, regions, lang, model_name, n, cfg, cache):
+    segs = json.load(open(cache)) if os.path.exists(cache) else transcribe(x, sr, sample_regions(regions, n), lang, model_name, None, quiet=True)
+    from collections import Counter
+    cnt = Counter(m for s in segs for m in re.findall(cfg["name_re"], s["text"]))
+    print("names: candidates from %s (count): " % ("the cached full transcription" if os.path.exists(cache) else "a sample"))
+    print("       " + ", ".join("%s(%d)" % (k, v) for k, v in cnt.most_common(40)))
+    print("       -> build -n from the real names, e.g. -n \"ウィット=ウイット,ウェルシュ\"")
+#+end_src
+*** Command line
+**** Names specification
 #+begin_src python
 def parse_names(spec):
     """'正=誤1|誤2,名前' -> {canonical: [variants]}"""
@@ -405,29 +584,30 @@ def parse_names(spec):
         names[canon.strip()] = [v.strip() for v in vars_.split("|") if v.strip()]
     return names
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run", help="full pipeline on a 16 kHz mono WAV")
-    r.add_argument("--audio", required=True); r.add_argument("--lang", default="ja")
-    r.add_argument("--ref"); r.add_argument("--names", default="")
-    r.add_argument("--model", default="large-v3"); r.add_argument("--work", required=True)
-    r.add_argument("--out", required=True); r.add_argument("--report", required=True)
-    r.add_argument("--force", action="store_true")
-    a = ap.parse_args()
+def make_prompt(names, cfg):
+    return (cfg["sep"].join(names) + cfg["stop"]) if names else None
+#+end_src
+**** Common preparation
+Audio, reference cues (shifted), VAD and regions — shared by =run= and
+the probes.
+#+begin_src python
+def prepare(a):
     from scipy.io import wavfile
     os.makedirs(a.work, exist_ok=True)
     sr, x = wavfile.read(a.audio); x = x.astype(np.float32)/32768; total = len(x)/sr
-    cfg = lang_cfg(a.lang); names = parse_names(a.names)
-    cues = read_srt(a.ref) if a.ref else []
-    print("audio %.1f min; reference cues %d" % (total/60, len(cues)), flush=True)
+    cues = read_srt(a.ref, a.shift) if a.ref else []
     vad = run_vad(x, sr, os.path.join(a.work, "vad.json"))
     regions = build_regions(cues, vad, total)
+    return sr, x, total, cues, vad, regions
+#+end_src
+**** run
+#+begin_src python
+def cmd_run(a):
+    sr, x, total, cues, vad, regions = prepare(a)
     json.dump(regions, open(os.path.join(a.work, "regions.json"), "w"))
-    print("VAD speech %.1f min; %d regions, %.1f min" % (sum(e-s for s, e in vad)/60, len(regions), sum(e-s for s, e in regions)/60), flush=True)
-    prompt = None
-    if names:
-        prompt = ("、" if not cfg["spaces"] else ", ").join(names) + ("。" if not cfg["spaces"] else ".")
+    cfg = lang_cfg(a.lang); names = parse_names(a.names); prompt = make_prompt(names, cfg)
+    print("audio %.1f min; reference cues %d; VAD speech %.1f min; %d regions, %.1f min"
+          % (total/60, len(cues), sum(e-s for s, e in vad)/60, len(regions), sum(e-s for s, e in regions)/60), flush=True)
     A = transcribe(x, sr, regions, a.lang, a.model, prompt, os.path.join(a.work, "segments_prompt.json"), a.force) if prompt else None
     B = transcribe(x, sr, regions, a.lang, a.model, None, os.path.join(a.work, "segments_noprompt.json"), a.force)
     merged, used, dropped = merge_passes(A, B, regions, vad, cfg, prompt, names)
@@ -436,19 +616,52 @@ def main():
     write_srt(a.out, [(s, e, t) for s, e, t, _ in out])
     nmiss, nlow = write_report(a.report, out, vad, used, dropped, len(cues))
     print("written %s: %d cues; uncovered speech chunks %d; low-confidence lines %d; report %s" % (a.out, len(out), nmiss, nlow, a.report))
+#+end_src
+**** probe
+#+begin_src python
+def cmd_probe(a):
+    sr, x, total, cues, vad, regions = prepare(a); cfg = lang_cfg(a.lang)
+    what = ["timeline", "regions", "language", "names"] if a.what == "all" else [a.what]
+    for w in what:
+        if w == "timeline": probe_timeline(cues, vad, total)
+        elif w == "regions": probe_regions(cues, vad, total)
+        elif w == "language": probe_language(x, sr, regions, a.model, a.samples)
+        elif w == "models": probe_models(x, sr, regions, a.lang, [m.strip() for m in a.models.split(",") if m.strip()], a.samples, cfg)
+        elif w == "names": probe_names(x, sr, regions, a.lang, a.model, a.samples, cfg, os.path.join(a.work, "segments_noprompt.json"))
+        else: print("unknown probe: %s" % w); sys.exit(1)
+#+end_src
+**** Argument parser and dispatch
+#+begin_src python
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--audio", required=True, help="16 kHz mono WAV")
+    common.add_argument("--lang", default="ja"); common.add_argument("--ref"); common.add_argument("--shift", type=float, default=0.0)
+    common.add_argument("--model", default="large-v3"); common.add_argument("--work", required=True)
+    r = sub.add_parser("run", parents=[common], help="full pipeline")
+    r.add_argument("--names", default=""); r.add_argument("--out", required=True); r.add_argument("--report", required=True)
+    r.add_argument("--force", action="store_true")
+    p = sub.add_parser("probe", parents=[common], help="probe option values")
+    p.add_argument("--what", required=True, choices=["timeline", "regions", "language", "models", "names", "all"])
+    p.add_argument("--models", default="turbo,large-v3,medium"); p.add_argument("--samples", type=int, default=12)
+    a = ap.parse_args()
+    (cmd_run if a.cmd == "run" else cmd_probe)(a)
 
 if __name__ == "__main__":
     main()
 #+end_src
 
-* subtitles
+** subtitles.sh
 :PROPERTIES:
 :VISIBILITY: children
 :header-args: :mkdirp yes :tangle ~/0/bin/subtitles.sh :shebang "#!/usr/bin/bash"
 :END:
-The driver: options, the venv, audio decoding, the Python pipeline,
-an optional mkvmerge step, and a summary.
-** Environment
+The driver: options, the venv, audio decoding, the probes, the Python
+pipeline, an optional mkvmerge step, and a summary.
+*** Environment
+=~/.kxrc= may set =KXWHISPERVENV=; otherwise the venv lives in
+=~/.venvs/whisper=.
 #+begin_src bash
 if [ ! -z "$HOME" ] && [ -f "$HOME/.kxrc" ]
 then
@@ -457,36 +670,83 @@ fi
 VENV="${KXWHISPERVENV:-$HOME/.venvs/whisper}"
 set -e
 #+end_src
-** Usage and help
+*** Defaults
+Every option has a default so that =subtitles.sh INPUT= alone does a
+sensible thing: Japanese, VAD-only regions, one unprompted pass with
+large-v3, output beside the input.
+#+begin_src bash
+LANGCODE="ja"; REF=""; SHIFT="0"; NAMES=""; MODEL="large-v3"; ASTREAM=0
+OUT=""; WORK=""; FORCE=""; MKVOUT=""; PROBE=""; SAMPLES=12; MODELS="turbo,large-v3,medium"
+#+end_src
+*** Help
 #+begin_src bash
 help() {
-    echo "Usage: subtitles.sh [options] AUDIO-OR-VIDEO"
-    echo "transcribe a dubbed soundtrack into subtitles with Whisper, guided by a"
-    echo "reference SRT whose timings are right but whose text is not;"
-    echo "options:"
-    echo "-h            print this help message and exit"
-    echo "-l LANG       language code (default ja)"
-    echo "-r REF.srt    reference subtitles with usable timings (optional)"
-    echo "-n NAMES      character names for the prompt, comma-separated;"
-    echo "              a name may carry variants to normalise: 正=誤1|誤2"
-    echo "-m MODEL      Whisper model (default large-v3)"
-    echo "-a N          audio stream index inside a container (default 0)"
-    echo "-o OUT.srt    output (default: INPUT-basename.LANG.srt beside the input)"
-    echo "-w DIR        work dir with the cache (default /tmp/subtitles/BASENAME)"
-    echo "-f            force re-transcription, ignore cached passes"
-    echo "-M OUT.mkv    also mux the SRT into the input MKV as a new track"
+    cat <<'HELP'
+Usage: subtitles.sh [options] INPUT
+
+Transcribe a film's dubbed soundtrack into subtitles of what is actually
+said, with a local Whisper model on the GPU.  An existing subtitle file
+whose timings are right but whose text is not (a translation track, an OCR
+of a bitmap track) serves as the map of where speech is; the subtitles are
+built from the dub's own word timestamps and snapped to those cues.
+
+INPUT is any audio or video file ffmpeg reads (an extracted .aac, an MKV, ...).
+Output: INPUT-basename.LANG.srt and INPUT-basename.LANG_review.txt beside the
+input (the review lists speech left without a line and the least confident
+lines); the work dir keeps the VAD and both Whisper passes as a cache.
+
+Options (default in brackets):
+  -h            this help
+  -l LANG       language of the dub, ISO code [ja]            probe: -p language
+  -r REF.srt    reference subtitles with usable timings [none: VAD only]
+  -s SECONDS    shift REF.srt by this much before use, + = later [0]
+                                                              probe: -p timeline
+  -n NAMES      character names for the transcription prompt, comma-separated
+                [none: a single unprompted pass]; a name may carry variants to
+                normalise to it:  正=誤1|誤2                    probe: -p names
+  -m MODEL      Whisper model: turbo, large-v3, medium, small ... [large-v3]
+                                                              probe: -p models
+  -a N          audio stream index inside a container [0]     probe: -p streams
+  -o OUT.srt    output file [INPUT-basename.LANG.srt beside the input]
+  -w DIR        work dir with the cache [/tmp/subtitles/INPUT-basename]
+  -f            force re-transcription, ignore the cached passes
+  -M OUT.mkv    additionally mux the SRT into the input MKV as a new
+                subtitle track (language LANG, not default) [no]
+
+Probes (-p) do not transcribe; they tell which option values fit the film:
+  -p streams    list the audio streams of INPUT: index, language, codec  (-a)
+  -p timeline   offset between REF.srt and the speech heard in the audio (-s)
+  -p regions    how much speech REF.srt covers; regions to transcribe
+  -p language   Whisper language detection on a sample                  (-l)
+  -p models     sample-transcribe with every model of -L: speed, confidence,
+                hallucinations, sample text                             (-m)
+  -p names      candidate character names from a sample transcription  (-n)
+  -p all        every probe except models
+  -S N          sample regions used by the probes [12]
+  -L MODELS     models tried by -p models [turbo,large-v3,medium]
+
+Typical sequence for a new film:
+  subtitles.sh -p streams film.mkv
+  subtitles.sh -p all -a 2 -r wrong-but-timed.srt film.mkv
+  subtitles.sh -p models -a 2 -r wrong-but-timed.srt film.mkv
+  subtitles.sh -a 2 -r wrong-but-timed.srt -s 10.8 -n "名1=誤,名2" -M "film +ja.mkv" film.mkv
+HELP
     exit 1
 }
 #+end_src
-** Option parsing
+*** Option parsing
+**** getopts loop
 #+begin_src bash
-LANGCODE="ja"; REF=""; NAMES=""; MODEL="large-v3"; ASTREAM=0; OUT=""; WORK=""; FORCE=""; MKVOUT=""
-while getopts "hl:r:n:m:a:o:w:fM:" opt
+while getopts "hl:r:s:n:m:a:o:w:fM:p:S:L:" opt
 do
     case $opt in
         h ) help ;;
+#+end_src
+**** Transcription options
+#+begin_src bash
         l ) LANGCODE="$OPTARG" ;;
         r ) REF="$OPTARG" ;;
+        s ) SHIFT="$OPTARG" ;;
         n ) NAMES="$OPTARG" ;;
         m ) MODEL="$OPTARG" ;;
         a ) ASTREAM="$OPTARG" ;;
@@ -494,10 +754,22 @@ do
         w ) WORK="$OPTARG" ;;
         f ) FORCE="--force" ;;
         M ) MKVOUT="$OPTARG" ;;
+#+end_src
+**** Probe options
+#+begin_src bash
+        p ) PROBE="$OPTARG" ;;
+        S ) SAMPLES="$OPTARG" ;;
+        L ) MODELS="$OPTARG" ;;
+#+end_src
+**** Fallthrough and shift
+#+begin_src bash
         ,* ) help ;;
     esac
 done
 shift $((OPTIND -1))
+#+end_src
+*** Input checks and derived paths
+#+begin_src bash
 INPUT="$1"
 if [ -z "$INPUT" ] || [ ! -f "$INPUT" ]
 then
@@ -509,6 +781,10 @@ then
     echo "Error: reference SRT not found: $REF"
     exit 1
 fi
+case "$PROBE" in
+    ""|streams|timeline|regions|language|models|names|all ) ;;
+    ,* ) echo "Error: unknown probe '$PROBE' (streams|timeline|regions|language|models|names|all)"; exit 1 ;;
+esac
 BASE="$(basename "$INPUT")"; BASE="${BASE%.*}"
 DIR="$(cd "$(dirname "$INPUT")" && pwd)"
 [ -z "$OUT" ] && OUT="$DIR/$BASE.$LANGCODE.srt"
@@ -516,7 +792,18 @@ DIR="$(cd "$(dirname "$INPUT")" && pwd)"
 REPORT="${OUT%.srt}_review.txt"
 mkdir -p "$WORK"
 #+end_src
-** The Whisper venv
+*** Probe: audio streams
+Needs only =ffprobe=; answered before anything else is set up.
+#+begin_src bash
+if [ "$PROBE" = "streams" ]
+then
+    echo "streams: audio streams of $INPUT (index for -a, language, codec, channels, title)"
+    ffprobe -v error -select_streams a -show_entries stream=index,codec_name,channels:stream_tags=language,title -of csv=p=0 "$INPUT" \
+        | awk -F, '{printf "   -a %d   %-4s %-8s %s ch  %s\n", NR-1, $4, $2, $3, $5}'
+    exit 0
+fi
+#+end_src
+*** The Whisper venv
 Created on first use on top of the system PyTorch (which carries the
 CUDA build); =openai-whisper= brings the model code, =silero-vad= the
 voice activity detector.
@@ -535,10 +822,12 @@ then
     echo "  python3 -m venv --system-site-packages $VENV && $VENV/bin/pip install openai-whisper silero-vad scipy"
     exit 1
 fi
+PY="$VENV/bin/python"
+WHISPERPY="$(command -v subtitles-whisper.py)"
 #+end_src
-** Decode the audio
-Any container or codec =ffmpeg= reads; stream =-a N= selects the audio
-track of a video file.  16 kHz mono is what Whisper and the VAD want.
+*** Decode the audio
+Any container or codec =ffmpeg= reads; =-a N= selects the audio track
+of a video file.  16 kHz mono is what Whisper and the VAD want.
 #+begin_src bash
 WAV="$WORK/audio16k.wav"
 if [ ! -f "$WAV" ] || [ "$INPUT" -nt "$WAV" ]
@@ -548,17 +837,29 @@ then
     echo "-------------------------"
     ffmpeg -nostdin -v error -y -i "$INPUT" -map 0:a:$ASTREAM -ac 1 -ar 16000 -c:a pcm_s16le "$WAV"
 fi
+REFOPT=(); [ ! -z "$REF" ] && REFOPT=(--ref "$REF" --shift "$SHIFT")
 #+end_src
-** Transcribe and build
+*** Probes needing the audio
+#+begin_src bash
+if [ ! -z "$PROBE" ]
+then
+    echo "-------------------------"
+    echo "Probe: $PROBE  (model $MODEL, $SAMPLES sample regions)"
+    echo "-------------------------"
+    "$PY" "$WHISPERPY" probe --what "$PROBE" --audio "$WAV" --lang "$LANGCODE" "${REFOPT[@]}" \
+        --model "$MODEL" --models "$MODELS" --samples "$SAMPLES" --work "$WORK"
+    exit 0
+fi
+#+end_src
+*** Transcribe and build
 #+begin_src bash
 echo "-------------------------"
 echo "Transcribing ($MODEL, $LANGCODE) — regions from ${REF:-VAD only}; work dir $WORK"
 echo "-------------------------"
-REFOPT=(); [ ! -z "$REF" ] && REFOPT=(--ref "$REF")
-"$VENV/bin/python" "$(command -v subtitles-whisper.py)" run --audio "$WAV" --lang "$LANGCODE" "${REFOPT[@]}" \
+"$PY" "$WHISPERPY" run --audio "$WAV" --lang "$LANGCODE" "${REFOPT[@]}" \
     --names "$NAMES" --model "$MODEL" --work "$WORK" --out "$OUT" --report "$REPORT" $FORCE
 #+end_src
-** Optional: mux into the MKV
+*** Optional: mux into the MKV
 Adds the new SRT as a further subtitle track of the input MKV
 (language tag =LANGCODE=, not default); the existing tracks are untouched.
 #+begin_src bash
@@ -570,7 +871,7 @@ then
     mkvmerge -o "$MKVOUT" "$INPUT" --language 0:"$LANGCODE" --default-track-flag 0:no --sub-charset 0:UTF-8 "$OUT" | grep -v '進行状況\|Progress' || true
 fi
 #+end_src
-** Summary
+*** Summary
 #+begin_src bash
 echo "-------------------------"
 echo "Subtitles: $OUT"
