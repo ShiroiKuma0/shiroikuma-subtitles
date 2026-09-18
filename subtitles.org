@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.4.1 - description
+* subtitles - version 1.5.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -85,7 +85,9 @@ subtitles.sh [options] INPUT            INPUT: any audio or video file ffmpeg re
   -f            force re-transcription, ignore cached passes
   -M            update the input MKV in place: the SRT goes in before the
                 first subtitle track of LANG (text before bitmap), after all
-                subtitles when there is none; verified before replacing
+                subtitles when there is none; verified before replacing; the
+                SRT and the review then move into the work dir (nothing is
+                left beside the movie)
   -S N          sample regions for the probes (default 12)
   -L MODELS     models tried by the models probe (default turbo,large-v3,medium)
 #+end_example
@@ -123,6 +125,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
 - The Whisper model (large-v3, 2.9 GB) is downloaded on first use into =~/.cache/whisper=.
 
 * Changelog
+** 1.5.0
+*** 2026-09-18_15-38-19 UTC (金曜日)
+**** After a successful -M the SRT and the review file are moved from beside the movie into the work dir, so nothing is left next to the MKV; the review's summary is printed before.
 ** 1.4.1
 *** 2026-09-18_15-22-31 UTC (金曜日)
 **** Fix: the in-place verification counted "ID" lines of mkvmerge -i, which include the per-track tag lines of HandBrake-made files (14 for 7 tracks) — it refused valid remuxes; tracks are now counted from the JSON identification, and the message says which check failed.
@@ -978,7 +983,9 @@ Options (default in brackets):
   -M            update the input MKV in place: the SRT is inserted before the
                 first subtitle track of LANG (text before bitmap), after all
                 subtitle tracks when there is none; the remux is verified
-                (track list, packet counts) before it replaces the file [no]
+                (track list, packet counts) before it replaces the file; the
+                SRT and the review file then move into the work dir, so
+                nothing is left beside the movie [no]
   -S N          sample regions used by the probes [12]
   -L MODELS     models tried by the models probe [turbo,large-v3,medium]
 
@@ -1175,14 +1182,28 @@ print(",".join(order))' "$LANGCODE")"
     echo "Updated: $INPUT ($NNEW tracks)"
     mkvmerge -J "$INPUT" | "$PY" -c 'import json,sys
 for t in json.load(sys.stdin)["tracks"]: print("   %2d %-9s %-22s %s" % (t["id"], t["type"], t["codec"], t["properties"].get("language", "")))'
+#+end_src
+**** Tidy up
+The SRT now lives inside the MKV; it and the review are moved into
+the work dir (still there for a re-mux or a look, until the cache is
+cleared), after the review's summary lines have been shown.
+#+begin_src bash
+    echo "Review summary:"
+    head -3 "$REPORT" | sed 's/^/   /'
+    mv -f "$OUT" "$REPORT" "$WORK/"
+    OUT="$WORK/$(basename "$OUT")"; REPORT="$WORK/$(basename "$REPORT")"
 fi
 #+end_src
 *** Summary
 #+begin_src bash
 echo "-------------------------"
-echo "Subtitles: $OUT"
-echo "Review:    $REPORT"
-[ ! -z "$MKVOUT" ] && echo "MKV:       $INPUT (updated in place)"
+if [ ! -z "$MKVOUT" ]
+then
+    echo "MKV:       $INPUT (updated in place; SRT and review moved to the cache)"
+else
+    echo "Subtitles: $OUT"
+    echo "Review:    $REPORT"
+fi
 echo "Cache:     $WORK  (re-run with -f to transcribe again)"
 echo "-------------------------"
 #+end_src
