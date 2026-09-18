@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.4.0 - description
+* subtitles - version 1.4.1 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -123,6 +123,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
 - The Whisper model (large-v3, 2.9 GB) is downloaded on first use into =~/.cache/whisper=.
 
 * Changelog
+** 1.4.1
+*** 2026-09-18_15-22-31 UTC (金曜日)
+**** Fix: the in-place verification counted "ID" lines of mkvmerge -i, which include the per-track tag lines of HandBrake-made files (14 for 7 tracks) — it refused valid remuxes; tracks are now counted from the JSON identification, and the message says which check failed.
 ** 1.4.0
 *** 2026-09-18_14-22-18 UTC (金曜日)
 **** Fix: a cue starting at 0 s no longer gets a negative start time. -M now updates the input MKV in place: the new SRT is inserted before the first subtitle track of the dub's language (after all others when there is none), the remux is verified (track list, packet counts) before it replaces the original.
@@ -1156,15 +1159,22 @@ print(",".join(order))' "$LANGCODE")"
     rm -f "$TMPMKV"
     mkvmerge -o "$TMPMKV" "$INPUT" --language 0:"$LANGCODE" --default-track-flag 0:no --sub-charset 0:UTF-8 "$OUT" --track-order "$ORDER" | grep -v '進行状況\|Progress' || true
     counts() { ffprobe -v error -count_packets -select_streams "$2" -show_entries stream=nb_read_packets -of csv=p=0 "$1" | tr '\n' ' '; }
-    NOLD="$(mkvmerge -i "$INPUT" | grep -c 'ID')"; NNEW="$(mkvmerge -i "$TMPMKV" | grep -c 'ID')"
-    if [ "$NNEW" -ne $((NOLD + 1)) ] || [ "$(counts "$INPUT" v)$(counts "$INPUT" a)" != "$(counts "$TMPMKV" v)$(counts "$TMPMKV" a)" ]
+    ntracks() { mkvmerge -J "$1" | "$PY" -c 'import json,sys; print(len(json.load(sys.stdin)["tracks"]))'; }
+    NOLD="$(ntracks "$INPUT")"; NNEW="$(ntracks "$TMPMKV")"
+    if [ "$NNEW" -ne $((NOLD + 1)) ]
     then
-        echo "Error: the remux does not verify (tracks $NOLD -> $NNEW, or packet counts differ); the original is untouched, the remux is at $TMPMKV"
+        echo "Error: the remux has $NNEW tracks, expected $((NOLD + 1)); the original is untouched, the remux is at $TMPMKV"
+        exit 1
+    fi
+    if [ "$(counts "$INPUT" v)$(counts "$INPUT" a)" != "$(counts "$TMPMKV" v)$(counts "$TMPMKV" a)" ]
+    then
+        echo "Error: video/audio packet counts differ between the original and the remux; the original is untouched, the remux is at $TMPMKV"
         exit 1
     fi
     mv -f "$TMPMKV" "$INPUT"
     echo "Updated: $INPUT ($NNEW tracks)"
-    mkvmerge -i "$INPUT" | grep 'ID' | sed 's/^/   /'
+    mkvmerge -J "$INPUT" | "$PY" -c 'import json,sys
+for t in json.load(sys.stdin)["tracks"]: print("   %2d %-9s %-22s %s" % (t["id"], t["type"], t["codec"], t["properties"].get("language", "")))'
 fi
 #+end_src
 *** Summary
