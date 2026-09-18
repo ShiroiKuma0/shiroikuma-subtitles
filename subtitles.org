@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.3.0 - description
+* subtitles - version 1.4.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -83,7 +83,9 @@ subtitles.sh [options] INPUT            INPUT: any audio or video file ffmpeg re
   -o OUT.srt    output (default INPUT-basename.LANG.srt beside the input)
   -w DIR        work dir with the cache (default /tmp/subtitles/BASENAME)
   -f            force re-transcription, ignore cached passes
-  -M OUT.mkv    additionally mux the SRT into the input MKV as a new track
+  -M            update the input MKV in place: the SRT goes in before the
+                first subtitle track of LANG (text before bitmap), after all
+                subtitles when there is none; verified before replacing
   -S N          sample regions for the probes (default 12)
   -L MODELS     models tried by the models probe (default turbo,large-v3,medium)
 #+end_example
@@ -96,7 +98,7 @@ track serves as well — only its timings are read) are picked and
 listed, each marked "this one will be used".
 #+begin_example
 subtitles.sh -p "Dark knight, the -- [7][227] (2008) 2160p.mkv"
-subtitles.sh    -n "バットマン,ジョーカー,ゴードン" "Dark knight, the -- [7][227] (2008) 2160p.mkv"
+subtitles.sh -M -n "バットマン,ジョーカー,ゴードン" "Dark knight, the -- [7][227] (2008) 2160p.mkv"
 subtitles.sh -p -r japanese-wrong.srt thin-red-line.aac
 #+end_example
 
@@ -121,6 +123,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
 - The Whisper model (large-v3, 2.9 GB) is downloaded on first use into =~/.cache/whisper=.
 
 * Changelog
+** 1.4.0
+*** 2026-09-18_14-22-18 UTC (金曜日)
+**** Fix: a cue starting at 0 s no longer gets a negative start time. -M now updates the input MKV in place: the new SRT is inserted before the first subtitle track of the dub's language (after all others when there is none), the remux is verified (track list, packet counts) before it replaces the original.
 ** 1.3.0
 *** 2026-09-18_11-34-09 UTC (金曜日)
 **** Automatic track selection from the container: without -a the audio stream tagged with the dub language is used, without -r the fullest subtitle track (PGS timings read from the packets, no OCR needed) — both listed with "this one will be used"; -r none for VAD only.
@@ -209,7 +214,7 @@ def srt_time(s):
     return int(h)*3600 + int(m)*60 + int(sec) + int(ms)/1000
 
 def fmt_time(t):
-    ms = int(round(t*1000))
+    ms = max(0, int(round(t*1000)))
     return "%02d:%02d:%02d,%03d" % (ms//3600000, (ms//60000) % 60, (ms//1000) % 60, ms % 1000)
 
 def hms(s): return "%d:%02d:%05.2f" % (s//3600, (s % 3600)//60, s % 60)
@@ -477,7 +482,7 @@ def build_cues(units, cues, cfg):
         text = "".join(w["w"] for w in ws).strip()
         text = re.sub(r"\s+", " " if cfg["spaces"] else "", text)
         if cfg["strip_end"]: text = re.sub("[" + re.escape(cfg["strip_end"]) + "]+$", "", text)
-        st, en = ws[0]["start"]-LEAD, ws[-1]["end"]+LINGER
+        st, en = max(0.0, ws[0]["start"]-LEAD), ws[-1]["end"]+LINGER
         s2, e2 = nearest(ws[0]["start"], starts), nearest(ws[-1]["end"], ends)
         if s2 is not None and s2 <= ws[0]["start"]+0.05: st = s2
         if e2 is not None and e2 >= ws[-1]["end"]-0.05: en = e2
@@ -967,14 +972,16 @@ Options (default in brackets):
   -o OUT.srt    output file [INPUT-basename.LANG.srt beside the input]
   -w DIR        work dir with the cache [/tmp/subtitles/INPUT-basename]
   -f            force re-transcription, ignore the cached passes
-  -M OUT.mkv    additionally mux the SRT into the input MKV as a new
-                subtitle track (language LANG, not default) [no]
+  -M            update the input MKV in place: the SRT is inserted before the
+                first subtitle track of LANG (text before bitmap), after all
+                subtitle tracks when there is none; the remux is verified
+                (track list, packet counts) before it replaces the file [no]
   -S N          sample regions used by the probes [12]
   -L MODELS     models tried by the models probe [turbo,large-v3,medium]
 
 Typical sequence for a new film (the MKV carries the dub and a subtitle track):
   subtitles.sh -p film.mkv
-  subtitles.sh -n "名1=誤,名2" -M "film +ja.mkv" film.mkv
+  subtitles.sh -M -n "名1=誤,名2" film.mkv
 With a separate audio file and reference:
   subtitles.sh -p -r wrong-but-timed.srt dub.aac
   subtitles.sh -r wrong-but-timed.srt -s 10.8 -n "名1=誤,名2" dub.aac
@@ -985,7 +992,7 @@ HELP
 *** Option parsing
 **** getopts loop
 #+begin_src bash
-while getopts "hpP:l:r:s:n:m:a:o:w:fM:S:L:" opt
+while getopts "hpP:l:r:s:n:m:a:o:w:fMS:L:" opt
 do
     case $opt in
         h ) help ;;
@@ -1001,7 +1008,7 @@ do
         o ) OUT="$OPTARG" ;;
         w ) WORK="$OPTARG" ;;
         f ) FORCE="--force" ;;
-        M ) MKVOUT="$OPTARG" ;;
+        M ) MKVOUT=1 ;;
 #+end_src
 **** Probe options
 #+begin_src bash
@@ -1112,16 +1119,52 @@ echo "-------------------------"
 "$PY" "$WHISPERPY" run --audio "$WAV" --lang "$LANGCODE" "${REFOPT[@]}" \
     --names "$NAMES" --model "$MODEL" --work "$WORK" --out "$OUT" --report "$REPORT" $FORCE
 #+end_src
-*** Optional: mux into the MKV
-Adds the new SRT as a further subtitle track of the input MKV
-(language tag =LANGCODE=, not default); the existing tracks are untouched.
+*** Optional: update the MKV in place
+The new SRT becomes a subtitle track of the input itself.  Position:
+before the first subtitle track tagged with the dub's language, so
+that text precedes bitmap within the language; after all subtitle
+tracks when there is none.  The remux goes to a temporary file next
+to the input, is verified — the same tracks in the new order plus
+one, every video and audio stream with its packet count unchanged —
+and only then replaces the original.
+**** Track order
 #+begin_src bash
 if [ ! -z "$MKVOUT" ]
 then
+    case "$INPUT" in
+        ,*.mkv|*.MKV|*.mka|*.webm ) ;;
+        ,* ) echo "Error: -M needs a Matroska input to update; $INPUT is not one."; exit 1 ;;
+    esac
+    ORDER="$(mkvmerge -J "$INPUT" | "$PY" -c '
+import json, sys
+d = json.load(sys.stdin); lang = sys.argv[1]
+iso = {"ja": "jpn", "en": "eng", "cs": "cze ces", "de": "ger deu", "fr": "fre fra", "es": "spa", "it": "ita", "ko": "kor", "zh": "chi zho", "ru": "rus", "pt": "por", "nl": "dut nld", "pl": "pol", "sv": "swe"}
+same = lambda t: (t or "").lower() == lang or (t or "").lower() in iso.get(lang, "").split()
+ids = [t["id"] for t in d["tracks"]]
+subs = [t["id"] for t in d["tracks"] if t["type"] == "subtitles"]
+own = [i for i in subs if same(d["tracks"][ids.index(i)]["properties"].get("language"))]
+at = own[0] if own else (subs[-1] + 1 if subs else len(ids))
+order = ["0:%d" % i for i in ids if i < at] + ["1:0"] + ["0:%d" % i for i in ids if i >= at]
+print(",".join(order))' "$LANGCODE")"
+#+end_src
+**** Remux, verify, replace
+#+begin_src bash
+    TMPMKV="$INPUT.remux-tmp"
     echo "-------------------------"
-    echo "Muxing $OUT into $MKVOUT ..."
+    echo "Updating $INPUT in place: inserting $OUT (track order $ORDER) ..."
     echo "-------------------------"
-    mkvmerge -o "$MKVOUT" "$INPUT" --language 0:"$LANGCODE" --default-track-flag 0:no --sub-charset 0:UTF-8 "$OUT" | grep -v '進行状況\|Progress' || true
+    rm -f "$TMPMKV"
+    mkvmerge -o "$TMPMKV" "$INPUT" --language 0:"$LANGCODE" --default-track-flag 0:no --sub-charset 0:UTF-8 "$OUT" --track-order "$ORDER" | grep -v '進行状況\|Progress' || true
+    counts() { ffprobe -v error -count_packets -select_streams "$2" -show_entries stream=nb_read_packets -of csv=p=0 "$1" | tr '\n' ' '; }
+    NOLD="$(mkvmerge -i "$INPUT" | grep -c 'ID')"; NNEW="$(mkvmerge -i "$TMPMKV" | grep -c 'ID')"
+    if [ "$NNEW" -ne $((NOLD + 1)) ] || [ "$(counts "$INPUT" v)$(counts "$INPUT" a)" != "$(counts "$TMPMKV" v)$(counts "$TMPMKV" a)" ]
+    then
+        echo "Error: the remux does not verify (tracks $NOLD -> $NNEW, or packet counts differ); the original is untouched, the remux is at $TMPMKV"
+        exit 1
+    fi
+    mv -f "$TMPMKV" "$INPUT"
+    echo "Updated: $INPUT ($NNEW tracks)"
+    mkvmerge -i "$INPUT" | grep 'ID' | sed 's/^/   /'
 fi
 #+end_src
 *** Summary
@@ -1129,7 +1172,7 @@ fi
 echo "-------------------------"
 echo "Subtitles: $OUT"
 echo "Review:    $REPORT"
-[ ! -z "$MKVOUT" ] && echo "MKV:       $MKVOUT"
+[ ! -z "$MKVOUT" ] && echo "MKV:       $INPUT (updated in place)"
 echo "Cache:     $WORK  (re-run with -f to transcribe again)"
 echo "-------------------------"
 #+end_src
