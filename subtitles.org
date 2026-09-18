@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.5.0 - description
+* subtitles - version 1.6.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -40,12 +40,19 @@ builds subtitles from the dub's own word timestamps.
 4. Filters: prompt echoes, the classic YouTube-outro hallucinations
    (「ご視聴ありがとうございました」, "Thanks for watching"), repetition
    loops, no-speech segments.  Name variants are normalised.
-5. Subtitle lines from word timestamps: cut at sentence ends, pauses
+5. Speakers (experimental, =-d on=): VAD phrases get a voice embedding
+   (ECAPA-TDNN, SpeechBrain), long phrases are clustered over the film,
+   short ones join the nearest voice heard nearby; a change of voice
+   inside a cue is placed at a legal token boundary near the silence.
+   Reliable on a scene, not yet on a whole film — see the changelog.
+6. Subtitle lines from word timestamps: cut at sentence ends, pauses
    ≥ 0.7 s, the reference cue boundaries and a length cap; starts and
    ends snapped to reference cues when within 0.3 s; ≥ 1.2 s on screen,
    ≤ 2 lines (16 characters for Japanese, 42 for Latin scripts);
-   trailing 。 removed for Japanese.
-6. Checks: VAD speech left without a line, the lowest-confidence lines,
+   trailing 。 removed for Japanese.  With =-d on=, a cue holding two
+   speakers puts each on its own line; when that does not fit two lines
+   it becomes two cues.
+7. Checks: VAD speech left without a line, the lowest-confidence lines,
    written to a review report beside the SRT.
 
 ** Lessons baked in (from the first use, The Thin Red Line, 2026-09-16)
@@ -83,6 +90,8 @@ subtitles.sh [options] INPUT            INPUT: any audio or video file ffmpeg re
   -o OUT.srt    output (default INPUT-basename.LANG.srt beside the input)
   -w DIR        work dir with the cache (default /tmp/subtitles/BASENAME)
   -f            force re-transcription, ignore cached passes
+  -d on         experimental speaker separation (default off): two speakers
+                in one cue go on separate lines
   -M            update the input MKV in place: the SRT goes in before the
                 first subtitle track of LANG (text before bitmap), after all
                 subtitles when there is none; verified before replacing; the
@@ -121,10 +130,15 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   installed system-wide (torch 2.13+cu130 on kumatux).
 - A venv on top of the system PyTorch, created automatically on first
   run at =$KXWHISPERVENV= (default =~/.venvs/whisper=):
-  =python3 -m venv --system-site-packages ~/.venvs/whisper && ~/.venvs/whisper/bin/pip install openai-whisper silero-vad scipy=
-- The Whisper model (large-v3, 2.9 GB) is downloaded on first use into =~/.cache/whisper=.
+  =python3 -m venv --system-site-packages ~/.venvs/whisper && ~/.venvs/whisper/bin/pip install openai-whisper silero-vad speechbrain scipy=
+- The Whisper model (large-v3, 2.9 GB) is downloaded on first use into
+  =~/.cache/whisper=; the ECAPA speaker model (80 MB) into the work
+  dir's parent =/tmp/subtitles/models=.
 
 * Changelog
+** 1.6.0
+*** 2026-09-18_21-32-41 UTC (金曜日)
+**** Speaker separation, experimental and OFF by default (-d on): every VAD phrase gets an ECAPA voice embedding (SpeechBrain), long phrases are clustered over the film, short ones join the nearest local voice, and a cue holding two clearly different voices puts each on its own line. On a 3-minute scene it separates four speakers correctly; over a whole film it is not reliable yet (Whisper's Japanese token times are too coarse to place the change between the right tokens, sub-second phrases give noisy embeddings), so it stays opt-in until a forced aligner and a real diarization pipeline are added.
 ** 1.5.0
 *** 2026-09-18_15-38-19 UTC (金曜日)
 **** After a successful -M the SRT and the review file are moved from beside the movie into the work dir, so nothing is left next to the MKV; the review's summary is printed before.
@@ -195,6 +209,13 @@ VAD_MIN_OUTSIDE = 0.6            # VAD chunk outside the cues worth adding
 LEAD, LINGER, MIN_DUR, MAX_DUR, GAP, SNAP = 0.10, 0.45, 1.2, 7.0, 0.08, 0.30
 PAUSE_SPLIT = 0.7                # a pause this long ends a subtitle unit
 LOW_CONF = -0.8                  # avg logprob below this is listed for review
+PHRASE_GAP, SPK_MIN, SPK_DIST = 0.12, 0.5, 0.7   # speaker phrases: split at silences this long, minimum audio per embedding, cluster cut (cosine distance)
+EDGE_FRAC = 0.25                 # a first/last phrase group of a Whisper segment smaller than this share of its words is a timing error
+SPK_LONG, SPK_NEAR = 1.0, 90.0   # phrases >= SPK_LONG s form the clusters; shorter ones join the nearest voice heard within SPK_NEAR s
+NO_LINE_START = "ぁぃぅぇぉゃゅょっゎァィゥェォャュョッヮーんン"   # a token beginning with one of these cannot start a speaker's line
+RUN_MIN_WORDS, RUN_MIN_SEC, EDGE_TOL = 3, 0.6, 0.2    # a speaker change needs a run this long, and a silence within EDGE_TOL of the word boundary
+SPK_CONTRAST = 0.35              # and the two runs' own voice embeddings must be this dissimilar (cosine similarity below)
+MODELS_DIR = "/tmp/subtitles/models"
 #+end_src
 **** Per-language table
 Maximum line length, whether words join with spaces, which punctuation
@@ -203,11 +224,11 @@ phrases Whisper is known to produce for the language, and how a name
 list is turned into a prompt.  Unknown languages get the "_" entry.
 #+begin_src python
 LANG = {
-    "ja": dict(maxline=16, spaces=False, punct_end="。！？!?", strip_end="。", sep="、", stop="。",
+    "ja": dict(maxline=16, spaces=False, punct_end="。！？!?", strip_end="。", sep="、", stop="。", dash="",
                hallu=["ご視聴ありがとう", "チャンネル登録", "字幕", "おやすみなさい",
                       "ご覧いただ", "次回", "最後まで", "吹き替え", "登場人物", "映画の映像"],
                name_re=r"[ァ-ヴー]{2,}"),
-    "_":  dict(maxline=42, spaces=True, punct_end=".!?", strip_end="", sep=", ", stop=".",
+    "_":  dict(maxline=42, spaces=True, punct_end=".!?", strip_end="", sep=", ", stop=".", dash="- ",
                hallu=["Thanks for watching", "Thank you for watching", "Subtitles by",
                       "Amara.org", "Subscribe", "Like and subscribe"],
                name_re=r"(?<![.!?]\s)(?<!^)\b[A-Z][a-z]{2,}\b"),
@@ -422,11 +443,183 @@ def merge_passes(A, B, regions, vad, cfg, prompt, names):
                     for w in s["words"]: w["w"] = w["w"].replace(v, canon)
     return out, used, dropped
 #+end_src
+*** Speakers
+**** Phrases
+The unit of voice identity is a stretch of speech between silences of
+≥ =PHRASE_GAP= — found by a fine VAD pass over the audio, not by
+Whisper's word gaps, which inside a segment are absorbed into the
+neighbouring words.  A Whisper segment's tokens
+are mapped onto the phrases the segment overlaps by rescaling the token
+times onto those phrases' span (segment-level times are reliable, token
+times lean early by up to ≈ 0.5 s), each token then joining the phrase
+it overlaps most; a small first or last group of the segment still
+follows the rest of the segment.
+#+begin_src python
+def make_phrases(x, sr, segs, cache, cues=()):
+    if os.path.exists(cache): fine = json.load(open(cache))
+    else:
+        import torch
+        from silero_vad import load_silero_vad, get_speech_timestamps
+        ts = get_speech_timestamps(torch.from_numpy(x), load_silero_vad(onnx=False), sampling_rate=sr, threshold=0.5,
+                                   min_speech_duration_ms=150, min_silence_duration_ms=int(PHRASE_GAP*1000), speech_pad_ms=30)
+        fine = [(d["start"]/sr, d["end"]/sr) for d in ts]; json.dump(fine, open(cache, "w"))
+    phr = [dict(start=s_, end=e_, words=[]) for s_, e_ in fine]
+    bounds = sorted(set(round(p_["start"], 3) for p_ in phr))
+    starts = [p_["start"] for p_ in phr]
+    ends = [p_["end"] for p_ in phr]
+    for seg in segs:
+        ws = [w for w in seg["words"] if w["w"].strip()]
+        if not ws: continue
+        # phrases this segment overlaps (by its segment-level times, which are far better than its word times)
+        lo = bisect.bisect_left(ends, seg["start"] + 0.05); hi = bisect.bisect_right(starts, seg["end"] - 0.05)
+        over = list(range(lo, hi))
+        if not over:
+            mid = (seg["start"] + seg["end"])/2; over = [max(0, min(len(phr)-1, bisect.bisect_right(starts, mid) - 1))]
+        # rescale the token times from the segment's own span onto the span of those phrases
+        w0, w1 = ws[0]["start"], ws[-1]["end"]; p0, p1 = phr[over[0]]["start"], phr[over[-1]]["end"]
+        scale = (p1 - p0)/(w1 - w0) if w1 > w0 and p1 > p0 else 1.0
+        assign = []
+        for w in ws:
+            a_, b_ = p0 + (w["start"]-w0)*scale, p0 + (w["end"]-w0)*scale
+            def overlap(j): return max(0.0, min(b_, phr[j]["end"]) - max(a_, phr[j]["start"]))
+            def dist(j): return max(phr[j]["start"] - b_, a_ - phr[j]["end"], 0.0)
+            assign.append(max(over, key=lambda j: (overlap(j), -dist(j))))
+        # a small first or last group is Whisper's timing leaning over a boundary, not a turn
+        groups = []
+        for k, j in enumerate(assign):
+            if groups and groups[-1][0] == j: groups[-1][1].append(k)
+            else: groups.append([j, [k]])
+        lim = max(2, int(EDGE_FRAC*len(ws)))
+        if len(groups) > 1 and len(groups[0][1]) < lim:
+            for k in groups[0][1]: assign[k] = groups[1][0]
+        if len(groups) > 1 and len(groups[-1][1]) < lim:
+            for k in groups[-1][1]: assign[k] = groups[-2][0]
+        for w, j in zip(ws, assign): phr[j]["words"].append(w)
+    phr = [p_ for p_ in phr if p_["words"]]
+    for p_ in phr: p_["end"] = min(p_["end"], max(w["end"] for w in p_["words"]) + 0.05); p_["start"] = max(p_["start"], min(w["start"] for w in p_["words"]) - 0.05)
+    return phr, bounds
+#+end_src
+**** Clustering: long phrases define the voices
+Embeddings of phrases shorter than a second are unreliable, so only
+phrases ≥ =SPK_LONG= are clustered (average linkage, cosine distance,
+cut at =SPK_DIST=).  Every shorter phrase then joins the cluster whose
+centroid is nearest among the voices heard within =SPK_NEAR= seconds
+of it — a handful of candidates instead of the whole cast.
+#+begin_src python
+def cluster_voices(phr, E):
+    from scipy.cluster.hierarchy import linkage, fcluster
+    n = len(phr); lab = [0]*n
+    longi = [i for i, p_ in enumerate(phr) if p_["end"] - p_["start"] >= SPK_LONG]
+    if len(longi) < 2:
+        return [1]*n
+    cl = fcluster(linkage(E[longi], method="average", metric="cosine"), t=SPK_DIST, criterion="distance")
+    for i, c in zip(longi, cl): lab[i] = int(c)
+    cent = {}
+    for c in set(cl):
+        v = E[[i for i, cc in zip(longi, cl) if cc == c]].mean(axis=0); cent[int(c)] = v/(np.linalg.norm(v)+1e-9)
+    for i, p_ in enumerate(phr):
+        if lab[i]: continue
+        near = {lab[j] for j in longi if abs(phr[j]["start"] - p_["start"]) <= SPK_NEAR} or set(cent)
+        lab[i] = max(near, key=lambda c: float(E[i] @ cent[c]))
+    return lab
+#+end_src
+**** Robust labels
+Whisper's word times are ±0.3 s.  A change of label between two runs
+of words is therefore placed at the best legal token boundary near the
+audio silence — legal: the two tokens are ≥ =PHRASE_GAP= apart or a
+VAD/cue edge lies within =EDGE_TOL= of them, the token after it does
+not begin with a small kana or ー, and the boundary is not inside a
+katakana or kanji compound — searching two tokens either side; without
+one, the change is dropped.  A run is also dropped (absorbed by the
+neighbour nearer in time) when it is shorter than =RUN_MIN_WORDS= or
+=RUN_MIN_SEC=, or when its own voice embedding is not clearly different
+from the previous run's (cosine similarity ≥ =SPK_CONTRAST=) — cluster
+ids alone over-split a whole film.
+#+begin_src python
+def is_kata(ch): return "\u30a0" <= ch <= "\u30ff"
+def is_kanji(ch): return "\u4e00" <= ch <= "\u9fff"
+
+def legal_boundary(words, j, bounds):
+    """may a speaker's line start at words[j]?"""
+    if j <= 0 or j >= len(words): return False
+    a, b = words[j-1], words[j]
+    ta, tb = a["w"].strip(), b["w"].strip()
+    if not ta or not tb or tb[:1] in NO_LINE_START: return False
+    if (is_kata(ta[-1]) and is_kata(tb[0])) or (is_kanji(ta[-1]) and is_kanji(tb[0])): return False   # inside a word
+    if b["start"] - a["end"] >= PHRASE_GAP: return True
+    i = bisect.bisect_left(bounds, a["end"] - EDGE_TOL)
+    return i < len(bounds) and bounds[i] <= b["start"] + EDGE_TOL
+
+def smooth_labels(segs, bounds):
+    words = [w for seg in segs for w in seg["words"] if w["w"].strip()]
+    changed = True
+    while changed:
+        changed = False; runs = speaker_runs(words); pos = 0
+        for k, r in enumerate(runs):
+            j = pos; pos += len(r)
+            if k == 0: continue
+            prev = runs[k-1]
+            # 1. is this change at a legal boundary?  else move it to the nearest legal one within 2 tokens
+            if not legal_boundary(words, j, bounds):
+                cand = [c for c in (j-1, j+1, j-2, j+2) if 0 < c < len(words) and legal_boundary(words, c, bounds)]
+                if cand:
+                    c = cand[0]
+                    for w in words[min(c, j):max(c, j)]: w["spk"] = prev[0]["spk"] if c > j else r[0]["spk"]
+                else:
+                    for w in r: w["spk"] = prev[0]["spk"]
+                changed = True; break
+            # 2. too short a run, or no real voice contrast with the previous run: absorb into the nearer neighbour
+            def voice(run):
+                v = np.mean([w["emb"] for w in run if "emb" in w], axis=0); return v/(np.linalg.norm(v)+1e-9)
+            weak = ("emb" in r[0] and "emb" in prev[0] and float(voice(r) @ voice(prev)) >= SPK_CONTRAST)
+            if weak or len(r) < RUN_MIN_WORDS or r[-1]["end"] - r[0]["start"] < RUN_MIN_SEC:
+                nxt = runs[k+1] if k+1 < len(runs) else None
+                dp = r[0]["start"] - prev[-1]["end"]; dn = nxt[0]["start"] - r[-1]["end"] if nxt else 9e9
+                tgt = prev if dp <= dn else nxt
+                for w in r: w["spk"] = tgt[0]["spk"]
+                changed = True; break
+#+end_src
+**** Embeddings and global clustering
+One ECAPA-TDNN embedding per phrase (padded to =SPK_MIN= seconds of
+audio), average-linkage clustering on cosine distance over the whole
+film, cut at =SPK_DIST=.  The label lands on every word; cached.
+#+begin_src python
+def label_speakers(x, sr, segs, cache, cues=()):
+    phr, bounds = make_phrases(x, sr, segs, os.path.join(os.path.dirname(cache), "vad_fine.json"), cues)
+    if os.path.exists(cache):
+        lab = json.load(open(cache))
+        if len(lab) == len(phr) and os.path.exists(cache + ".npy"):
+            E = np.load(cache + ".npy")
+            for p, l, e in zip(phr, lab, E):
+                for w in p["words"]: w["spk"] = l; w["emb"] = e
+            smooth_labels(segs, bounds)
+            return max(lab) if lab else 0
+    import torch
+    from speechbrain.inference.speaker import EncoderClassifier
+    from scipy.cluster.hierarchy import linkage, fcluster
+    enc = EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb", savedir=os.path.join(MODELS_DIR, "ecapa"), run_opts={"device": "cuda:0"})
+    E = []; prog = Progress("speaker embeddings phrase", len(phr))
+    for i, p in enumerate(phr):
+        a0, b0 = int(max(0, p["start"])*sr), int(min(len(x), p["end"])*sr)
+        if b0-a0 < int(SPK_MIN*sr): a0 = max(0, b0-int(SPK_MIN*sr)); b0 = min(len(x), a0+int(SPK_MIN*sr))
+        with torch.no_grad(): e = enc.encode_batch(torch.from_numpy(x[a0:b0]).unsqueeze(0).to("cuda:0")).squeeze().cpu().numpy()
+        E.append(e/(np.linalg.norm(e)+1e-9))
+        if i % 50 == 0 or i == len(phr)-1: prog.step(i+1)
+    prog.done()
+    lab = cluster_voices(phr, np.stack(E))
+    json.dump(lab, open(cache, "w")); np.save(cache + ".npy", np.stack(E))
+    for p, l, e in zip(phr, lab, E):
+        for w in p["words"]: w["spk"] = l; w["emb"] = e
+    smooth_labels(segs, bounds)
+    return max(lab) if lab else 0
+#+end_src
 *** Subtitle building
 **** Units from word timestamps
 A unit ends at sentence punctuation, at a pause ≥ =PAUSE_SPLIT=, at a
-reference cue boundary that falls between two words, or when the text
-or duration cap is reached.
+reference cue boundary that falls in a gap between two words, or when
+the text or duration cap is reached — never between two contiguous
+tokens (Whisper's Japanese "words" are sub-word pieces) unless the
+text has grown far past the cap.
 #+begin_src python
 def make_units(segs, cues, cfg):
     cue_ends = sorted(c[1] for c in cues); maxchars = 2*cfg["maxline"]
@@ -441,8 +634,8 @@ def make_units(segs, cues, cfg):
             end_sentence = bool(re.search("[" + re.escape(cfg["punct_end"]) + "]$", w["w"].strip()))
             gap = (nxt["start"] - w["end"]) if nxt else 9
             i = bisect.bisect_left(cue_ends, w["end"]-0.05)
-            at_boundary = nxt is not None and i < len(cue_ends) and cue_ends[i] <= nxt["start"]+0.05
-            too_long = len(text) >= maxchars or (cur[-1]["end"]-cur[0]["start"]) >= MAX_DUR
+            at_boundary = nxt is not None and gap >= 0.08 and i < len(cue_ends) and cue_ends[i] <= nxt["start"]+0.05
+            too_long = (len(text) >= maxchars and gap >= 0.08) or len(text) >= maxchars*3//2 or (cur[-1]["end"]-cur[0]["start"]) >= MAX_DUR
             if end_sentence or gap >= PAUSE_SPLIT or at_boundary or too_long or nxt is None:
                 units.append(dict(words=list(cur), logprob=seg["avg_logprob"])); cur = []
     return units
@@ -473,7 +666,7 @@ def break_lines(t, cfg):
     best = None; mid = len(t)/2
     for i in range(6, len(t)-5):
         ch = t[i-1]
-        score = abs(i-mid) + (0 if ch in "、。，！？" else (3 if ch in "はがをにでとへもの" else 8))
+        score = abs(i-mid) + (0 if ch in "、。，！？" else (3 if ch in "はがをにでへもの" else 8))
         if best is None or score < best[0]: best = (score, i)
     i = best[1] if best else int(mid)
     return t[:i] + "\n" + t[i:]
@@ -481,49 +674,91 @@ def break_lines(t, cfg):
 **** Timing and assembly
 Lead-in and linger around the words, snapped to reference cue edges
 when within =SNAP=, minimum duration, tiny fragments glued onto the
-previous line, overlaps resolved.
+previous line, overlaps resolved.  Inside a cue, speaker runs shorter
+than =RUN_MIN_WORDS= / =RUN_MIN_SEC= are merged with their neighbour
+(a lone first token is never a speaker of its own); a cue with two
+speakers left gets one line each.
 #+begin_src python
+def clean_text(ws, cfg):
+    text = "".join(w["w"] for w in ws).strip()
+    text = re.sub(r"\s+", " " if cfg["spaces"] else "", text)
+    if cfg["strip_end"]: text = re.sub("[" + re.escape(cfg["strip_end"]) + "]+$", "", text)
+    return text
+
+def speaker_runs(ws):
+    """consecutive words of one speaker -> list of word lists (one list when unlabelled)"""
+    runs = []
+    for w in ws:
+        if runs and runs[-1][0].get("spk") == w.get("spk"): runs[-1].append(w)
+        else: runs.append([w])
+    return runs
+
+def timed(ws, starts, ends):
+    st, en = max(0.0, ws[0]["start"]-LEAD), ws[-1]["end"]+LINGER
+    s2, e2 = nearest(ws[0]["start"], starts), nearest(ws[-1]["end"], ends)
+    if s2 is not None and s2 <= ws[0]["start"]+0.05: st = s2
+    if e2 is not None and e2 >= ws[-1]["end"]-0.05: en = e2
+    if en-st < MIN_DUR: en = st + MIN_DUR
+    return st, en
+
+def unit_runs(ws):
+    """speaker runs inside one cue; a run too short to be a line of its own joins its neighbour"""
+    runs = speaker_runs(ws)
+    while len(runs) > 1:
+        short = [k for k, r in enumerate(runs) if len(r) < RUN_MIN_WORDS or r[-1]["end"] - r[0]["start"] < RUN_MIN_SEC]
+        if not short: break
+        k = short[0]; tgt = k-1 if k else 1
+        runs[min(k, tgt)] = runs[min(k, tgt)] + runs[max(k, tgt)]; del runs[max(k, tgt)]
+    return runs
+
 def build_cues(units, cues, cfg):
     starts = sorted(c[0] for c in cues); ends = sorted(c[1] for c in cues); out = []
     for u in units:
-        ws = u["words"]
-        text = "".join(w["w"] for w in ws).strip()
-        text = re.sub(r"\s+", " " if cfg["spaces"] else "", text)
-        if cfg["strip_end"]: text = re.sub("[" + re.escape(cfg["strip_end"]) + "]+$", "", text)
-        st, en = max(0.0, ws[0]["start"]-LEAD), ws[-1]["end"]+LINGER
-        s2, e2 = nearest(ws[0]["start"], starts), nearest(ws[-1]["end"], ends)
-        if s2 is not None and s2 <= ws[0]["start"]+0.05: st = s2
-        if e2 is not None and e2 >= ws[-1]["end"]-0.05: en = e2
-        if en-st < MIN_DUR: en = st + MIN_DUR
-        out.append(dict(start=st, end=en, text=text, logprob=u["logprob"]))
+        runs = unit_runs(u["words"])
+        if len(runs) == 1:
+            st, en = timed(u["words"], starts, ends)
+            out.append(dict(start=st, end=en, text=clean_text(u["words"], cfg), logprob=u["logprob"], multi=False)); continue
+        # two speakers in one cue: one line each, as long as both fit one line; otherwise a cue per speaker run
+        i = 0
+        while i < len(runs):
+            a = runs[i]; b = runs[i+1] if i+1 < len(runs) else None
+            ta = clean_text(a, cfg); tb = clean_text(b, cfg) if b else ""
+            if b and len(ta) <= cfg["maxline"] and len(tb) <= cfg["maxline"]:
+                st, en = timed(a + b, starts, ends)
+                out.append(dict(start=st, end=en, text=cfg["dash"] + ta + "\n" + cfg["dash"] + tb, logprob=u["logprob"], multi=True)); i += 2
+            else:
+                st, en = timed(a, starts, ends)
+                out.append(dict(start=st, end=en, text=ta, logprob=u["logprob"], multi=False)); i += 1
     out.sort(key=lambda c: c["start"])
     merged = []
     for c in out:
-        if merged and len(c["text"]) <= 3 and c["start"]-merged[-1]["end"] < 0.4 and len(merged[-1]["text"])+len(c["text"]) <= 2*cfg["maxline"]:
+        if merged and not c["multi"] and not merged[-1]["multi"] and len(c["text"]) <= 3 and c["start"]-merged[-1]["end"] < 0.4 and len(merged[-1]["text"])+len(c["text"]) <= 2*cfg["maxline"]:
             merged[-1]["text"] += ("" if not cfg["spaces"] else " ") + c["text"]; merged[-1]["end"] = max(merged[-1]["end"], c["end"]); continue
         merged.append(c)
     for a, b in zip(merged, merged[1:]):
         if a["end"] > b["start"]-GAP: a["end"] = max(a["start"]+0.5, b["start"]-GAP)
-    return [(c["start"], c["end"], break_lines(c["text"], cfg), c["logprob"]) for c in merged]
+    return [(c["start"], c["end"], c["text"] if c["multi"] else break_lines(c["text"], cfg), c["logprob"], c["multi"]) for c in merged]
 #+end_src
 *** Review report
 VAD speech left without a line, the lowest-confidence lines, and
 every dropped segment with its reason.
 #+begin_src python
 def uncovered(cues, vad):
-    cov = np.zeros(int(max([e for _, e, _, _ in cues] + [1])*10)+20)
-    for s, e, _, _ in cues: cov[int(s*10):int(e*10)+1] = 1
+    cov = np.zeros(int(max([c[1] for c in cues] + [1])*10)+20)
+    for c in cues: cov[int(c[0]*10):int(c[1]*10)+1] = 1
     return [(s, e) for s, e in vad if e-s >= 0.8 and int(e*10) < len(cov) and cov[int(s*10):int(e*10)].mean() < 0.3]
 
 def write_report(path, cues, vad, used, dropped, ref_count):
-    miss = uncovered(cues, vad); low = [c for c in cues if c[3] < LOW_CONF]
+    miss = uncovered(cues, vad); low = [c for c in cues if c[3] < LOW_CONF]; multi = [c for c in cues if c[4]]
     with open(path, "w", encoding="utf-8") as f:
-        f.write("subtitles: %d cues written (reference had %d)\n" % (len(cues), ref_count))
+        f.write("subtitles: %d cues written (reference had %d), %d with two speakers on separate lines\n" % (len(cues), ref_count, sum(1 for c in cues if c[4])))
         f.write("regions from the prompted pass: %d, from the unprompted pass: %d\n" % (used["prompt"], used["noprompt"]))
         f.write("VAD speech >= 0.8 s without a subtitle: %d chunks, %.1f min\n\n" % (len(miss), sum(e-s for s, e in miss)/60))
         for s, e in miss: f.write("   %s - %s (%.1f s)\n" % (hms(s), hms(e), e-s))
         f.write("\nLowest-confidence lines (avg logprob < %.1f): %d\n\n" % (LOW_CONF, len(low)))
-        for s, e, t, lp in low: f.write("%s --> %s  (%.2f)  %s\n" % (fmt_time(s), fmt_time(e), lp, t.replace("\n", " / ")))
+        for s, e, t, lp, _ in low: f.write("%s --> %s  (%.2f)  %s\n" % (fmt_time(s), fmt_time(e), lp, t.replace("\n", " / ")))
+        f.write("\nTwo-speaker cues (check a few — a wrong one means one voice was heard as two): %d\n\n" % len(multi))
+        for s, e, t, lp, _ in multi: f.write("%s --> %s  %s\n" % (fmt_time(s), fmt_time(e), t.replace("\n", " / ")))
         f.write("\nDropped Whisper segments: %d\n\n" % len(dropped))
         for seg, why in dropped: f.write("%s --> %s  [%s]  %s\n" % (fmt_time(seg["start"]), fmt_time(seg["end"]), why, seg["text"].strip()))
     return len(miss), len(low)
@@ -860,8 +1095,13 @@ def cmd_run(a):
     B = transcribe(x, sr, regions, a.lang, a.model, None, os.path.join(a.work, "segments_noprompt.json"), a.force, label="pass %d/%d (unprompted) region" % (npass, npass))
     merged, used, dropped = merge_passes(A, B, regions, vad, cfg, prompt, names)
     json.dump(merged, open(os.path.join(a.work, "segments_merged.json"), "w"), ensure_ascii=False)
+    if a.speakers:
+        nspk = label_speakers(x, sr, merged, os.path.join(a.work, "speakers.json"), cues)
+        print("  speakers: %d voice clusters over the film" % nspk, flush=True)
+        for seg in merged:
+            for w in seg["words"]: w.pop("emb", None)
     out = build_cues(make_units(merged, cues, cfg), cues, cfg)
-    write_srt(a.out, [(s, e, t) for s, e, t, _ in out])
+    write_srt(a.out, [(s, e, t) for s, e, t, _, _ in out])
     nmiss, nlow = write_report(a.report, out, vad, used, dropped, len(cues))
     print("written %s: %d cues; uncovered speech chunks %d; low-confidence lines %d; report %s" % (a.out, len(out), nmiss, nlow, a.report))
 #+end_src
@@ -889,7 +1129,7 @@ def main():
     common.add_argument("--model", default="large-v3"); common.add_argument("--work", required=True)
     r = sub.add_parser("run", parents=[common], help="full pipeline")
     r.add_argument("--names", default=""); r.add_argument("--out", required=True); r.add_argument("--report", required=True)
-    r.add_argument("--force", action="store_true")
+    r.add_argument("--force", action="store_true"); r.add_argument("--no-speakers", dest="speakers", action="store_false")
     p = sub.add_parser("probe", parents=[common], help="probe option values")
     p.add_argument("--what", required=True, choices=["timeline", "regions", "language", "models", "names", "all"])
     p.add_argument("--models", default="turbo,large-v3,medium"); p.add_argument("--samples", type=int, default=12)
@@ -931,7 +1171,7 @@ when there is none), one unprompted pass with large-v3, output beside
 the input.  An empty =ASTREAM= or =REF= means "choose automatically".
 #+begin_src bash
 LANGCODE="ja"; REF=""; SHIFT="0"; NAMES=""; MODEL="large-v3"; ASTREAM=""
-OUT=""; WORK=""; FORCE=""; MKVOUT=""; PROBE=""; SAMPLES=12; MODELS="turbo,large-v3,medium"
+OUT=""; WORK=""; FORCE=""; MKVOUT=""; PROBE=""; SAMPLES=12; MODELS="turbo,large-v3,medium"; SPEAKERS="off"
 #+end_src
 *** Help
 #+begin_src bash
@@ -980,6 +1220,9 @@ Options (default in brackets):
   -o OUT.srt    output file [INPUT-basename.LANG.srt beside the input]
   -w DIR        work dir with the cache [/tmp/subtitles/INPUT-basename]
   -f            force re-transcription, ignore the cached passes
+  -d on|off     EXPERIMENTAL speaker separation: two speakers inside one cue
+                go on separate lines (voice embeddings clustered over the
+                film); works on a scene, not reliably on a whole film [off]
   -M            update the input MKV in place: the SRT is inserted before the
                 first subtitle track of LANG (text before bitmap), after all
                 subtitle tracks when there is none; the remux is verified
@@ -1002,7 +1245,7 @@ HELP
 *** Option parsing
 **** getopts loop
 #+begin_src bash
-while getopts "hpP:l:r:s:n:m:a:o:w:fMS:L:" opt
+while getopts "hpP:l:r:s:n:m:a:o:w:fd:MS:L:" opt
 do
     case $opt in
         h ) help ;;
@@ -1018,6 +1261,7 @@ do
         o ) OUT="$OPTARG" ;;
         w ) WORK="$OPTARG" ;;
         f ) FORCE="--force" ;;
+        d ) SPEAKERS="$OPTARG" ;;
         M ) MKVOUT=1 ;;
 #+end_src
 **** Probe options
@@ -1069,12 +1313,12 @@ then
     echo "Creating the Whisper venv at $VENV ..."
     echo "-------------------------"
     python3 -m venv --system-site-packages "$VENV"
-    "$VENV/bin/pip" install -q openai-whisper silero-vad scipy
+    "$VENV/bin/pip" install -q openai-whisper silero-vad speechbrain scipy
 fi
-if ! "$VENV/bin/python" -c "import torch, whisper, silero_vad; assert torch.cuda.is_available()" 2>/dev/null
+if ! "$VENV/bin/python" -c "import torch, whisper, silero_vad, speechbrain; assert torch.cuda.is_available()" 2>/dev/null
 then
-    echo "Error: $VENV lacks whisper/silero_vad or CUDA is unavailable; recreate it:"
-    echo "  python3 -m venv --system-site-packages $VENV && $VENV/bin/pip install openai-whisper silero-vad scipy"
+    echo "Error: $VENV lacks whisper/silero_vad/speechbrain or CUDA is unavailable; recreate it:"
+    echo "  python3 -m venv --system-site-packages $VENV && $VENV/bin/pip install openai-whisper silero-vad speechbrain scipy"
     exit 1
 fi
 PY="$VENV/bin/python"
@@ -1126,8 +1370,9 @@ fi
 echo "-------------------------"
 echo "Transcribing ($MODEL, $LANGCODE) — reference $REFNOTE; work dir $WORK"
 echo "-------------------------"
+SPKOPT="--no-speakers"; [ "$SPEAKERS" = "on" ] && SPKOPT=""
 "$PY" "$WHISPERPY" run --audio "$WAV" --lang "$LANGCODE" "${REFOPT[@]}" \
-    --names "$NAMES" --model "$MODEL" --work "$WORK" --out "$OUT" --report "$REPORT" $FORCE
+    --names "$NAMES" --model "$MODEL" --work "$WORK" --out "$OUT" --report "$REPORT" $FORCE $SPKOPT
 #+end_src
 *** Optional: update the MKV in place
 The new SRT becomes a subtitle track of the input itself.  Position:
