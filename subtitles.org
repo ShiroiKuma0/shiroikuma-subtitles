@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.1.0 - description
+* subtitles - version 1.2.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -64,37 +64,30 @@ builds subtitles from the dub's own word timestamps.
 #+begin_example
 subtitles.sh [options] INPUT            INPUT: any audio or video file ffmpeg reads
   -h            this help
-  -l LANG       language of the dub (default ja); see -p language
+  -p            PROBE: run every probe and print a verdict per option — green
+                when the current value is right, yellow for a suggestion, red
+                when a change is needed — plus the ready-made next command
+  -P WHAT       one probe only: streams|timeline|regions|language|models|names
+  -l LANG       language of the dub (default ja)
   -r REF.srt    reference subtitles with usable timings (default none: VAD only)
-  -s SECONDS    shift REF.srt by this much before use (default 0); see -p timeline
+  -s SECONDS    shift REF.srt by this much before use (default 0)
   -n NAMES      character names for the prompt, comma-separated (default none:
-                single unprompted pass); a name may carry variants to normalise:
-                正=誤1|誤2 ; see -p names
-  -m MODEL      Whisper model (default large-v3); see -p models
-  -a N          audio stream index inside a container (default 0); see -p streams
+                single unprompted pass); a name may carry variants: 正=誤1|誤2
+  -m MODEL      Whisper model (default large-v3)
+  -a N          audio stream index inside a container (default 0)
   -o OUT.srt    output (default INPUT-basename.LANG.srt beside the input)
   -w DIR        work dir with the cache (default /tmp/subtitles/BASENAME)
   -f            force re-transcription, ignore cached passes
   -M OUT.mkv    additionally mux the SRT into the input MKV as a new track
-  -p PROBE      probe instead of transcribing, to choose the options above:
-                streams   list the audio streams of INPUT (for -a)
-                timeline  offset between REF.srt and the speech in the audio (for -s)
-                regions   how well REF.srt covers the speech; region statistics
-                language  Whisper language detection on a sample (for -l)
-                models    sample-transcribe with several models: speed, confidence,
-                          hallucinations, text (for -m); models from -L
-                names     candidate character names from a sample transcription (for -n)
-                all       every probe except models
   -S N          sample regions for the probes (default 12)
-  -L MODELS     models tried by -p models (default turbo,large-v3,medium)
+  -L MODELS     models tried by the models probe (default turbo,large-v3,medium)
 #+end_example
-Example — the first film:
+The simple workflow: run once with =-p=, read the verdict, then run
+once more without =-p= — with the options the verdict recommended, if
+any.  Every pass shows "region xx/XXX" with elapsed and remaining time.
 #+begin_example
-subtitles.sh -p timeline -r japanese-wrong.srt thin-red-line.aac     # 0.0 s → same timeline
-subtitles.sh -p models -r japanese-wrong.srt thin-red-line.aac       # pick -m
-subtitles.sh -l ja -r japanese-wrong.srt \
-  -n "ウィット=ウイット|ウィッツ,ウェルシュ=ウエルシュ,スタロス,トール,ベル,ケック,ファイフ=ファイブ,ドール,ギャフ=ガフ,ストーム,マーティ,クインタード=クインタート" \
-  thin-red-line.aac
+subtitles.sh -p -r japanese-wrong.srt thin-red-line.aac
+subtitles.sh    -r japanese-wrong.srt -n "ウィット=ウイット,ウェルシュ,スタロス" thin-red-line.aac
 #+end_example
 
 * Install instructions
@@ -118,6 +111,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
 - The Whisper model (large-v3, 2.9 GB) is downloaded on first use into =~/.cache/whisper=.
 
 * Changelog
+** 1.2.0
+*** 2026-09-18_11-09-02 UTC (金曜日)
+**** Master probe -p: runs every probe and prints a verdict per option (green = in line, yellow = suggestion, red = change needed) with the ready-made next command; single probes moved to -P; per-region xx/XXX progress with elapsed and remaining time for every pass and probe.
 ** 1.1.0
 *** 2026-09-17_06-43-52 UTC (木曜日)
 **** Probes (-p streams|timeline|regions|language|models|names|all, -S, -L), reference shift -s, full -h, defaults for every option; source files regrouped under one heading and split finer by functionality.
@@ -283,6 +279,24 @@ def sample_regions(regions, n):
     if len(cand) <= n: return cand
     return [cand[int(i*len(cand)/n)] for i in range(n)]
 #+end_src
+**** Progress lines
+Every long loop reports =xx/XXX= with elapsed and remaining time: on a
+terminal as one line that rewrites itself, in a log as a line every
+25 steps and at the end.
+#+begin_src python
+def mmss(t): return "%d:%02d" % (t//60, t % 60)
+
+class Progress:
+    def __init__(self, label, total):
+        self.label, self.total, self.t0 = label, total, time.time(); self.tty = sys.stdout.isatty()
+    def step(self, i, extra=""):
+        el = time.time()-self.t0; rem = el/(i)*(self.total-i) if i else 0
+        line = "  %s %*d/%d  elapsed %s  remaining ~%s  %s" % (self.label, len(str(self.total)), i, self.total, mmss(el), mmss(rem), extra)
+        if self.tty: print("\r" + line + " "*8, end="", flush=True)
+        elif i % 25 == 0 or i == self.total: print(line, flush=True)
+    def done(self):
+        if self.tty: print(flush=True)
+#+end_src
 **** Loading a model
 #+begin_src python
 def load_model(name):
@@ -298,11 +312,12 @@ One Whisper call per region; the region's start is added back to every
 segment and word time.  The result is cached per pass so that the
 subtitle-building parameters can be re-tuned without re-transcribing.
 #+begin_src python
-def transcribe(x, sr, regions, lang, model_name, prompt, cache=None, force=False, model=None, quiet=False):
-    if cache and os.path.exists(cache) and not force: return json.load(open(cache))
+def transcribe(x, sr, regions, lang, model_name, prompt, cache=None, force=False, model=None, label="regions"):
+    if cache and os.path.exists(cache) and not force:
+        print("  %s: cached (%s)" % (label, os.path.basename(cache))); return json.load(open(cache))
     own = model is None
     if own: model = load_model(model_name)
-    out = []; t0 = time.time()
+    out = []; prog = Progress(label, len(regions))
     for k, (s, e) in enumerate(regions):
         r = model.transcribe(x[int(s*sr):int(e*sr)], language=lang, task="transcribe",
                              word_timestamps=True, initial_prompt=prompt,
@@ -313,9 +328,9 @@ def transcribe(x, sr, regions, lang, model_name, prompt, cache=None, force=False
                             compression_ratio=seg["compression_ratio"],
                             words=[dict(w=w["word"], start=s+w["start"], end=s+w["end"], p=w.get("probability", 0))
                                    for w in seg.get("words", [])]))
-        if not quiet and (k % 25 == 0 or k == len(regions)-1):
-            print("  region %d/%d  t=%.0f s  segments %d  %.0f s elapsed" % (k+1, len(regions), s, len(out), time.time()-t0), flush=True)
-            if cache: json.dump(out, open(cache, "w"), ensure_ascii=False)
+        prog.step(k+1, "at %s, %d segments" % (hms(s), len(out)))
+        if cache and (k % 25 == 0): json.dump(out, open(cache, "w"), ensure_ascii=False)
+    prog.done()
     if cache: json.dump(out, open(cache, "w"), ensure_ascii=False)
     if own: unload_model(model)
     return out
@@ -496,7 +511,8 @@ speaks" signal over ±180 s.  A peak near 0 means the same timeline;
 otherwise the offset is what =-s= needs.
 #+begin_src python
 def probe_timeline(cues, vad, total):
-    if not cues: print("timeline: no reference SRT given (-r)"); return
+    """-> offset in seconds, or None without a reference"""
+    if not cues: print("timeline: no reference SRT given (-r)"); return None
     n = int(total*10)+1; a = np.zeros(n); b = np.zeros(n)
     for s, e, _ in cues: a[int(s*10):int(e*10)+1] = 1
     for s, e in vad: b[int(s*10):int(e*10)+1] = 1
@@ -509,10 +525,12 @@ def probe_timeline(cues, vad, total):
     print("          first cue %s, first VAD speech %s" % (hms(cues[0][0]), hms(vad[0][0]) if vad else "-"))
     if abs(l[i]) >= 0.3: print("          -> the reference is on another timeline: use  -s %+.1f" % l[i])
     else: print("          -> same timeline, no -s needed")
+    return float(l[i])
 #+end_src
 **** regions — how well does the reference cover the speech?
 #+begin_src python
 def probe_regions(cues, vad, total):
+    """-> share of VAD speech outside the padded cues (0..1)"""
     out = outside_cues(cues, vad, total); regions = build_regions(cues, vad, total)
     print("regions: audio %.1f min; VAD speech %.1f min in %d chunks; reference cues %d (%.1f min)"
           % (total/60, sum(e-s for s, e in vad)/60, len(vad), len(cues), sum(e-s for s, e, _ in cues)/60))
@@ -520,21 +538,29 @@ def probe_regions(cues, vad, total):
           % (len(out), sum(e-s for s, e in out)/60, "" if cues else " (no reference: everything)"))
     for s, e in sorted(out, key=lambda r: r[0]-r[1])[:10]: print("            %s - %s (%.1f s)" % (hms(s), hms(e), e-s))
     print("         -> %d regions to transcribe, %.1f min, longest %.0f s" % (len(regions), sum(e-s for s, e in regions)/60, max((e-s for s, e in regions), default=0)))
+    speech = sum(e-s for s, e in vad)
+    return (sum(e-s for s, e in out)/speech) if speech else 0.0
 #+end_src
 **** language — what does Whisper hear?
 Language detection on the first 30 s of each sample region, averaged.
 #+begin_src python
-def probe_language(x, sr, regions, model_name, n):
+def probe_language(x, sr, regions, model_name, n, model=None):
+    """-> (top language, probability)"""
     import whisper, torch
-    model = load_model(model_name); probs = {}
-    for s, e in sample_regions(regions, n):
+    own = model is None
+    if own: model = load_model(model_name)
+    probs = {}; sample = sample_regions(regions, n); prog = Progress("language samples", len(sample))
+    for k, (s, e) in enumerate(sample):
         mel = whisper.log_mel_spectrogram(whisper.pad_or_trim(x[int(s*sr):int(e*sr)]), n_mels=model.dims.n_mels).to(model.device)
         _, p = model.detect_language(mel)
-        for k, v in p.items(): probs[k] = probs.get(k, 0) + v/n
+        for kk, v in p.items(): probs[kk] = probs.get(kk, 0) + v/len(sample)
+        prog.step(k+1)
+    prog.done()
     top = sorted(probs.items(), key=lambda kv: -kv[1])[:5]
     print("language: " + ", ".join("%s %.0f%%" % (k, 100*v) for k, v in top))
     print("          -> use  -l %s" % top[0][0])
-    unload_model(model)
+    if own: unload_model(model)
+    return top[0]
 #+end_src
 **** models — which model fits this film?
 Every model in the list transcribes the same sample (no prompt); per
@@ -542,36 +568,122 @@ model: transcription speed (model loading excluded), mean confidence, share of l
 segments the filter would drop, and the first lines of one sample so
 the text quality can be compared by eye.
 #+begin_src python
-def probe_models(x, sr, regions, lang, models, n, cfg):
+def probe_models(x, sr, regions, lang, models, n, cfg, keep=None):
+    """-> (best model, {model: sample segments}); keep = model name whose segments are wanted back"""
     sample = sample_regions(regions, n); mins = sum(e-s for s, e in sample)/60
     print("models: %d sample regions, %.1f min of audio; models %s" % (len(sample), mins, ", ".join(models)))
-    print("  %-12s %8s %9s %9s %8s %7s" % ("model", "x realtime", "logprob", "low(<-0.8)", "dropped", "chars"))
-    texts = {}
-    for m in models:
+    rows = []; texts = {}; segs_of = {}
+    for i, m in enumerate(models):
         try:
             model = load_model(m); t0 = time.time()
-            segs = transcribe(x, sr, sample, lang, m, None, model=model, quiet=True); dt = time.time()-t0
+            segs = transcribe(x, sr, sample, lang, m, None, model=model, label="model %d/%d %-9s" % (i+1, len(models), m)); dt = time.time()-t0
             unload_model(model)
         except Exception as ex: print("  %-12s failed: %s" % (m, ex)); continue
         lp = [s["avg_logprob"] for s in segs] or [0]
         low = sum(1 for v in lp if v < LOW_CONF)/len(lp); drop = sum(1 for s in segs if bad_reason(s, cfg, None))
-        print("  %-12s %8.1fx %9.2f %8.0f%% %8d %7d" % (m, mins*60/dt, sum(lp)/len(lp), 100*low, drop, sum(len(s["text"].strip()) for s in segs)))
+        rows.append((m, mins*60/dt, sum(lp)/len(lp), low, drop, sum(len(s["text"].strip()) for s in segs)))
         texts[m] = [s for s in segs if s["region"] == 0][:3]
-    for m, segs in texts.items():
-        print("  %s: " % m + " / ".join(s["text"].strip() for s in segs))
-    print("  -> higher logprob and fewer low/dropped at acceptable speed: that is your -m")
+        if m == keep: segs_of[m] = segs
+    print("  %-12s %8s %9s %9s %8s %7s" % ("model", "x realtime", "logprob", "low(<-0.8)", "dropped", "chars"))
+    for m, spd, lp, low, drop, ch in rows: print("  %-12s %8.1fx %9.2f %8.0f%% %8d %7d" % (m, spd, lp, 100*low, drop, ch))
+    for m, segs in texts.items(): print("  %s: " % m + " / ".join(s["text"].strip() for s in segs))
+    # best: highest logprob; another model needs +0.03 to beat the current default's neighbour
+    best = max(rows, key=lambda r: (round(r[2], 2), r[1]))[0] if rows else None
+    print("  -> best confidence: %s" % best)
+    return best, segs_of
 #+end_src
 **** names — which names does the dub use?
 Candidate names from a sample transcription: katakana runs for
 Japanese, capitalised non-initial words for Latin scripts, by count.
 #+begin_src python
-def probe_names(x, sr, regions, lang, model_name, n, cfg, cache):
-    segs = json.load(open(cache)) if os.path.exists(cache) else transcribe(x, sr, sample_regions(regions, n), lang, model_name, None, quiet=True)
+def probe_names(x, sr, regions, lang, model_name, n, cfg, cache, segs=None, given=None):
+    """-> (candidate Counter, given names never heard)"""
     from collections import Counter
+    source = "the given segments"
+    if segs is None and os.path.exists(cache): segs = json.load(open(cache)); source = "the cached full transcription"
+    if segs is None:
+        sample = sample_regions(regions, max(n, 30)); source = "a %d-region sample" % len(sample)
+        segs = transcribe(x, sr, sample, lang, model_name, None, label="names sample  region")
     cnt = Counter(m for s in segs for m in re.findall(cfg["name_re"], s["text"]))
-    print("names: candidates from %s (count): " % ("the cached full transcription" if os.path.exists(cache) else "a sample"))
+    print("names: candidates from %s (count): " % source)
     print("       " + ", ".join("%s(%d)" % (k, v) for k, v in cnt.most_common(40)))
-    print("       -> build -n from the real names, e.g. -n \"ウィット=ウイット,ウェルシュ\"")
+    unheard = []
+    if given:
+        alltext = "".join(s["text"] for s in segs)
+        unheard = [c for c, vs in given.items() if c not in alltext and not any(v in alltext for v in vs)]
+        print("       given names never heard in the sample: %s" % (", ".join(unheard) or "none"))
+    else:
+        print("       -> build -n from the real names, e.g. -n \"ウィット=ウイット,ウェルシュ\"")
+    return cnt, unheard
+#+end_src
+**** all — the master probe and its verdict
+Runs every probe (the names probe uses the cached full transcription
+when there is one, else a 30-region sample), then prints one line per
+option: the value in force, the recommendation, and a colour — green
+when they agree, yellow for a suggestion worth a look, red when the
+run would be wrong without the change — followed by the next command.
+#+begin_src python
+GREEN, YELLOW, RED, DIM, RESET = "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
+
+def verdict_table(rows, args_line):
+    colour = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+    def c(col, t): return (col + t + RESET) if colour else t
+    print("\n%-4s %-10s %-22s %s" % ("", "option", "in force", "verdict"))
+    for level, opt, cur, text in rows:
+        mark = {"ok": c(GREEN, "OK  "), "hint": c(YELLOW, "HINT"), "fix": c(RED, "FIX "), "na": c(DIM, "n/a ")}[level]
+        print("%s %-10s %-22s %s" % (mark, opt, cur, text if level != "ok" else c(GREEN, text)))
+    print("\nnext: subtitles.sh %s" % args_line)
+
+def probe_all(a, x, sr, total, cues, vad, regions, cfg, names):
+    rows = []; rec = {}
+    # -a: audio streams (list handed over by the shell)
+    streams = [tuple(t.split(":")) for t in a.streams.split(",") if t] if a.streams else []
+    if len(streams) > 1:
+        match = [int(i) for i, lang, codec in streams if lang == a.lang]
+        if a.astream in match or not match: rows.append(("ok", "-a", str(a.astream), "stream %d is tagged %s" % (a.astream, dict((int(i), l) for i, l, _ in streams).get(a.astream, "?"))))
+        else: rows.append(("fix", "-a", str(a.astream), "stream %d is tagged %s; stream %d is tagged %s" % (a.astream, dict((int(i), l) for i, l, _ in streams)[a.astream], match[0], a.lang))); rec["-a"] = str(match[0])
+    else: rows.append(("ok", "-a", str(a.astream), "the only audio stream"))
+    # -r / -s: timeline and coverage
+    if cues:
+        off = probe_timeline(cues, vad, total); share = probe_regions(cues, vad, total)
+        if abs(off - 0.0) >= 0.3:
+            rows.append(("fix", "-s", "%+.1f" % a.shift, "reference is %+.1f s off the audio: use -s %+.1f" % (off, a.shift + off))); rec["-s"] = "%+.1f" % (a.shift + off)
+        else: rows.append(("ok", "-s", "%+.1f" % a.shift, "reference and audio on the same timeline"))
+        if share > 0.10: rows.append(("hint", "-r", os.path.basename(a.ref), "%.0f%% of the speech lies outside its cues; VAD fills it, but check the file" % (100*share)))
+        else: rows.append(("ok", "-r", os.path.basename(a.ref), "covers %.0f%% of the speech" % (100*(1-share))))
+    else:
+        probe_regions(cues, vad, total)
+        rows.append(("hint", "-r", "none", "no reference: regions from VAD only (fine, but cue snapping is off)"))
+        rows.append(("na", "-s", "-", "no reference to shift"))
+    # -l: language, with the current model loaded once
+    model = load_model(a.model)
+    lang, prob = probe_language(x, sr, regions, a.model, a.samples, model=model)
+    if lang != a.lang: rows.append(("fix", "-l", a.lang, "Whisper hears %s (%.0f%%): use -l %s" % (lang, 100*prob, lang))); rec["-l"] = lang
+    else: rows.append(("ok", "-l", a.lang, "Whisper agrees (%.0f%%)" % (100*prob)))
+    unload_model(model)
+    # -m: models, keeping the current model's sample for the names probe
+    models = [m.strip() for m in a.models.split(",") if m.strip()]
+    if a.model not in models: models.insert(0, a.model)
+    best, segs_of = probe_models(x, sr, regions, a.lang, models, a.samples, cfg, keep=a.model)
+    if best and best != a.model: rows.append(("hint", "-m", a.model, "%s scored best on the sample: consider -m %s" % (best, best))); rec["-m"] = best
+    else: rows.append(("ok", "-m", a.model, "best confidence on the sample"))
+    # -n: names
+    cnt, unheard = probe_names(x, sr, regions, a.lang, a.model, a.samples, cfg, os.path.join(a.work, "segments_noprompt.json"), given=names or None)
+    top = [k for k, v in cnt.most_common(8) if v >= 2] or [k for k, v in cnt.most_common(5)]
+    if not names: rows.append(("hint", "-n", "none", "single unprompted pass; candidates: %s — pass the real names with -n" % ", ".join(top)))
+    elif unheard: rows.append(("hint", "-n", "%d names" % len(names), "never heard in the sample: %s" % ", ".join(unheard)))
+    else: rows.append(("ok", "-n", "%d names" % len(names), "all heard in the sample"))
+    # next command
+    parts = []
+    for opt, val in [("-a", rec.get("-a")), ("-l", rec.get("-l")), ("-s", rec.get("-s")), ("-m", rec.get("-m"))]:
+        if val: parts.append("%s %s" % (opt, val))
+    if a.ref: parts.append("-r \"%s\"" % a.ref)
+    if a.shift and "-s" not in rec: parts.append("-s %+.1f" % a.shift)
+    if a.names_spec: parts.append("-n \"%s\"" % a.names_spec)
+    elif top: parts.append("-n \"<pick from: %s>\"" % ",".join(top))
+    if a.astream and "-a" not in rec: parts.append("-a %d" % a.astream)
+    if a.model != "large-v3" and "-m" not in rec: parts.append("-m %s" % a.model)
+    verdict_table(rows, " ".join(parts) + " \"%s\"" % a.input)
 #+end_src
 *** Command line
 **** Names specification
@@ -596,6 +708,8 @@ def prepare(a):
     os.makedirs(a.work, exist_ok=True)
     sr, x = wavfile.read(a.audio); x = x.astype(np.float32)/32768; total = len(x)/sr
     cues = read_srt(a.ref, a.shift) if a.ref else []
+    cached = os.path.exists(os.path.join(a.work, "vad.json"))
+    print("  voice activity detection over %.1f min%s ..." % (total/60, " (cached)" if cached else ""), flush=True)
     vad = run_vad(x, sr, os.path.join(a.work, "vad.json"))
     regions = build_regions(cues, vad, total)
     return sr, x, total, cues, vad, regions
@@ -608,8 +722,9 @@ def cmd_run(a):
     cfg = lang_cfg(a.lang); names = parse_names(a.names); prompt = make_prompt(names, cfg)
     print("audio %.1f min; reference cues %d; VAD speech %.1f min; %d regions, %.1f min"
           % (total/60, len(cues), sum(e-s for s, e in vad)/60, len(regions), sum(e-s for s, e in regions)/60), flush=True)
-    A = transcribe(x, sr, regions, a.lang, a.model, prompt, os.path.join(a.work, "segments_prompt.json"), a.force) if prompt else None
-    B = transcribe(x, sr, regions, a.lang, a.model, None, os.path.join(a.work, "segments_noprompt.json"), a.force)
+    npass = 2 if prompt else 1
+    A = transcribe(x, sr, regions, a.lang, a.model, prompt, os.path.join(a.work, "segments_prompt.json"), a.force, label="pass 1/2 (prompted)  region") if prompt else None
+    B = transcribe(x, sr, regions, a.lang, a.model, None, os.path.join(a.work, "segments_noprompt.json"), a.force, label="pass %d/%d (unprompted) region" % (npass, npass))
     merged, used, dropped = merge_passes(A, B, regions, vad, cfg, prompt, names)
     json.dump(merged, open(os.path.join(a.work, "segments_merged.json"), "w"), ensure_ascii=False)
     out = build_cues(make_units(merged, cues, cfg), cues, cfg)
@@ -621,8 +736,8 @@ def cmd_run(a):
 #+begin_src python
 def cmd_probe(a):
     sr, x, total, cues, vad, regions = prepare(a); cfg = lang_cfg(a.lang)
-    what = ["timeline", "regions", "language", "names"] if a.what == "all" else [a.what]
-    for w in what:
+    if a.what == "all": return probe_all(a, x, sr, total, cues, vad, regions, cfg, parse_names(a.names_spec))
+    for w in [a.what]:
         if w == "timeline": probe_timeline(cues, vad, total)
         elif w == "regions": probe_regions(cues, vad, total)
         elif w == "language": probe_language(x, sr, regions, a.model, a.samples)
@@ -645,6 +760,8 @@ def main():
     p = sub.add_parser("probe", parents=[common], help="probe option values")
     p.add_argument("--what", required=True, choices=["timeline", "regions", "language", "models", "names", "all"])
     p.add_argument("--models", default="turbo,large-v3,medium"); p.add_argument("--samples", type=int, default=12)
+    p.add_argument("--streams", default="", help="idx:lang:codec,... as found by ffprobe"); p.add_argument("--astream", type=int, default=0)
+    p.add_argument("--names-spec", dest="names_spec", default=""); p.add_argument("--input", default="INPUT")
     a = ap.parse_args()
     (cmd_run if a.cmd == "run" else cmd_probe)(a)
 
@@ -683,12 +800,19 @@ OUT=""; WORK=""; FORCE=""; MKVOUT=""; PROBE=""; SAMPLES=12; MODELS="turbo,large-
 help() {
     cat <<'HELP'
 Usage: subtitles.sh [options] INPUT
+       subtitles.sh -p [options] INPUT
 
 Transcribe a film's dubbed soundtrack into subtitles of what is actually
 said, with a local Whisper model on the GPU.  An existing subtitle file
 whose timings are right but whose text is not (a translation track, an OCR
 of a bitmap track) serves as the map of where speech is; the subtitles are
 built from the dub's own word timestamps and snapped to those cues.
+
+The simple workflow is two commands: first with -p, which probes the file
+and prints a verdict per option — green when the value in force (default or
+given) is right, yellow for a suggestion, red when a change is needed — and
+the ready-made next command; then that command without -p.  Every pass
+reports "region xx/XXX" with elapsed and remaining time.
 
 INPUT is any audio or video file ffmpeg reads (an extracted .aac, an MKV, ...).
 Output: INPUT-basename.LANG.srt and INPUT-basename.LANG_review.txt beside the
@@ -697,38 +821,31 @@ lines); the work dir keeps the VAD and both Whisper passes as a cache.
 
 Options (default in brackets):
   -h            this help
-  -l LANG       language of the dub, ISO code [ja]            probe: -p language
+  -p            probe: run every probe, print the verdict and the next command
+  -P WHAT       one probe only: streams  audio streams of INPUT (for -a)
+                                timeline offset of REF.srt vs the speech (for -s)
+                                regions  how much speech REF.srt covers
+                                language Whisper language detection (for -l)
+                                models   sample-transcribe with -L (for -m)
+                                names    character-name candidates (for -n)
+  -l LANG       language of the dub, ISO code [ja]
   -r REF.srt    reference subtitles with usable timings [none: VAD only]
   -s SECONDS    shift REF.srt by this much before use, + = later [0]
-                                                              probe: -p timeline
   -n NAMES      character names for the transcription prompt, comma-separated
                 [none: a single unprompted pass]; a name may carry variants to
-                normalise to it:  正=誤1|誤2                    probe: -p names
+                normalise to it:  正=誤1|誤2
   -m MODEL      Whisper model: turbo, large-v3, medium, small ... [large-v3]
-                                                              probe: -p models
-  -a N          audio stream index inside a container [0]     probe: -p streams
+  -a N          audio stream index inside a container [0]
   -o OUT.srt    output file [INPUT-basename.LANG.srt beside the input]
   -w DIR        work dir with the cache [/tmp/subtitles/INPUT-basename]
   -f            force re-transcription, ignore the cached passes
   -M OUT.mkv    additionally mux the SRT into the input MKV as a new
                 subtitle track (language LANG, not default) [no]
-
-Probes (-p) do not transcribe; they tell which option values fit the film:
-  -p streams    list the audio streams of INPUT: index, language, codec  (-a)
-  -p timeline   offset between REF.srt and the speech heard in the audio (-s)
-  -p regions    how much speech REF.srt covers; regions to transcribe
-  -p language   Whisper language detection on a sample                  (-l)
-  -p models     sample-transcribe with every model of -L: speed, confidence,
-                hallucinations, sample text                             (-m)
-  -p names      candidate character names from a sample transcription  (-n)
-  -p all        every probe except models
   -S N          sample regions used by the probes [12]
-  -L MODELS     models tried by -p models [turbo,large-v3,medium]
+  -L MODELS     models tried by the models probe [turbo,large-v3,medium]
 
 Typical sequence for a new film:
-  subtitles.sh -p streams film.mkv
-  subtitles.sh -p all -a 2 -r wrong-but-timed.srt film.mkv
-  subtitles.sh -p models -a 2 -r wrong-but-timed.srt film.mkv
+  subtitles.sh -p -r wrong-but-timed.srt film.mkv
   subtitles.sh -a 2 -r wrong-but-timed.srt -s 10.8 -n "名1=誤,名2" -M "film +ja.mkv" film.mkv
 HELP
     exit 1
@@ -737,7 +854,7 @@ HELP
 *** Option parsing
 **** getopts loop
 #+begin_src bash
-while getopts "hl:r:s:n:m:a:o:w:fM:p:S:L:" opt
+while getopts "hpP:l:r:s:n:m:a:o:w:fM:S:L:" opt
 do
     case $opt in
         h ) help ;;
@@ -757,7 +874,8 @@ do
 #+end_src
 **** Probe options
 #+begin_src bash
-        p ) PROBE="$OPTARG" ;;
+        p ) PROBE="all" ;;
+        P ) PROBE="$OPTARG" ;;
         S ) SAMPLES="$OPTARG" ;;
         L ) MODELS="$OPTARG" ;;
 #+end_src
@@ -783,7 +901,7 @@ then
 fi
 case "$PROBE" in
     ""|streams|timeline|regions|language|models|names|all ) ;;
-    ,* ) echo "Error: unknown probe '$PROBE' (streams|timeline|regions|language|models|names|all)"; exit 1 ;;
+    ,* ) echo "Error: unknown probe '$PROBE' (-p, or -P streams|timeline|regions|language|models|names)"; exit 1 ;;
 esac
 BASE="$(basename "$INPUT")"; BASE="${BASE%.*}"
 DIR="$(cd "$(dirname "$INPUT")" && pwd)"
@@ -793,14 +911,17 @@ REPORT="${OUT%.srt}_review.txt"
 mkdir -p "$WORK"
 #+end_src
 *** Probe: audio streams
-Needs only =ffprobe=; answered before anything else is set up.
+Needs only =ffprobe=; answered before anything else is set up.  The
+master probe gets the same list handed over as =idx:lang:codec,...=.
 #+begin_src bash
-if [ "$PROBE" = "streams" ]
+STREAMS="$(ffprobe -v error -select_streams a -show_entries stream=index,codec_name,channels:stream_tags=language -of csv=p=0 "$INPUT" 2>/dev/null \
+        | awk -F, '{printf "%s%d:%s:%s", (NR>1?",":""), NR-1, ($4==""?"und":$4), $2}')"
+if [ "$PROBE" = "streams" ] || [ "$PROBE" = "all" ]
 then
     echo "streams: audio streams of $INPUT (index for -a, language, codec, channels, title)"
     ffprobe -v error -select_streams a -show_entries stream=index,codec_name,channels:stream_tags=language,title -of csv=p=0 "$INPUT" \
-        | awk -F, '{printf "   -a %d   %-4s %-8s %s ch  %s\n", NR-1, $4, $2, $3, $5}'
-    exit 0
+        | awk -F, '{printf "   -a %d   %-4s %-8s %s ch  %s\n", NR-1, ($4==""?"und":$4), $2, $3, $5}'
+    [ "$PROBE" = "streams" ] && exit 0
 fi
 #+end_src
 *** The Whisper venv
@@ -844,10 +965,11 @@ REFOPT=(); [ ! -z "$REF" ] && REFOPT=(--ref "$REF" --shift "$SHIFT")
 if [ ! -z "$PROBE" ]
 then
     echo "-------------------------"
-    echo "Probe: $PROBE  (model $MODEL, $SAMPLES sample regions)"
+    echo "Probe: $PROBE  (model $MODEL, $SAMPLES sample regions${REF:+, reference $REF})"
     echo "-------------------------"
     "$PY" "$WHISPERPY" probe --what "$PROBE" --audio "$WAV" --lang "$LANGCODE" "${REFOPT[@]}" \
-        --model "$MODEL" --models "$MODELS" --samples "$SAMPLES" --work "$WORK"
+        --model "$MODEL" --models "$MODELS" --samples "$SAMPLES" --work "$WORK" \
+        --streams "$STREAMS" --astream "$ASTREAM" --names-spec "$NAMES" --input "$INPUT"
     exit 0
 fi
 #+end_src
