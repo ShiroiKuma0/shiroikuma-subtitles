@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.2.0 - description
+* subtitles - version 1.3.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -54,6 +54,9 @@ builds subtitles from the dub's own word timestamps.
   Check the first cue against the first line of dialogue before running.
 - A raw =.aac= extracted from an MKV decodes with its 1024-sample
   priming in place, so it is timeline-correct as a standalone file.
+- A bitmap (PGS) subtitle track needs no OCR to serve as the timing
+  reference: its packets are "show" (large, with a duration) and
+  "clear" (≈30 bytes) display sets, which is all a cue map needs.
 - Two passes are not optional: with the prompt alone 12 of 32 minutes
   of speech came out as prompt echo; without it names drift
   (ウイット/ウィット).  Merged: 0.2 minutes uncovered.
@@ -69,12 +72,14 @@ subtitles.sh [options] INPUT            INPUT: any audio or video file ffmpeg re
                 when a change is needed — plus the ready-made next command
   -P WHAT       one probe only: streams|timeline|regions|language|models|names
   -l LANG       language of the dub (default ja)
-  -r REF.srt    reference subtitles with usable timings (default none: VAD only)
+  -r REF.srt    reference subtitles with usable timings (default: the fullest
+                subtitle track inside INPUT, PGS or text; "-r none" for VAD only)
   -s SECONDS    shift REF.srt by this much before use (default 0)
   -n NAMES      character names for the prompt, comma-separated (default none:
                 single unprompted pass); a name may carry variants: 正=誤1|誤2
   -m MODEL      Whisper model (default large-v3)
-  -a N          audio stream index inside a container (default 0)
+  -a N          audio stream index inside a container (default: the first
+                stream tagged with LANG, else 0)
   -o OUT.srt    output (default INPUT-basename.LANG.srt beside the input)
   -w DIR        work dir with the cache (default /tmp/subtitles/BASENAME)
   -f            force re-transcription, ignore cached passes
@@ -85,9 +90,14 @@ subtitles.sh [options] INPUT            INPUT: any audio or video file ffmpeg re
 The simple workflow: run once with =-p=, read the verdict, then run
 once more without =-p= — with the options the verdict recommended, if
 any.  Every pass shows "region xx/XXX" with elapsed and remaining time.
+With an MKV as input nothing else is needed: the audio stream tagged
+with the dub language and the fullest subtitle track (a bitmap PGS
+track serves as well — only its timings are read) are picked and
+listed, each marked "this one will be used".
 #+begin_example
+subtitles.sh -p "Dark knight, the -- [7][227] (2008) 2160p.mkv"
+subtitles.sh    -n "バットマン,ジョーカー,ゴードン" "Dark knight, the -- [7][227] (2008) 2160p.mkv"
 subtitles.sh -p -r japanese-wrong.srt thin-red-line.aac
-subtitles.sh    -r japanese-wrong.srt -n "ウィット=ウイット,ウェルシュ,スタロス" thin-red-line.aac
 #+end_example
 
 * Install instructions
@@ -111,6 +121,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
 - The Whisper model (large-v3, 2.9 GB) is downloaded on first use into =~/.cache/whisper=.
 
 * Changelog
+** 1.3.0
+*** 2026-09-18_11-34-09 UTC (金曜日)
+**** Automatic track selection from the container: without -a the audio stream tagged with the dub language is used, without -r the fullest subtitle track (PGS timings read from the packets, no OCR needed) — both listed with "this one will be used"; -r none for VAD only.
 ** 1.2.0
 *** 2026-09-18_11-09-02 UTC (金曜日)
 **** Master probe -p: runs every probe and prints a verdict per option (green = in line, yellow = suggestion, red = change needed) with the ready-made next command; single probes moved to -P; per-region xx/XXX progress with elapsed and remaining time for every pass and probe.
@@ -502,6 +515,109 @@ def write_report(path, cues, vad, used, dropped, ref_count):
         for seg, why in dropped: f.write("%s --> %s  [%s]  %s\n" % (fmt_time(seg["start"]), fmt_time(seg["end"]), why, seg["text"].strip()))
     return len(miss), len(low)
 #+end_src
+*** Container tracks
+When the input is a container, the audio and the timing reference can
+come from inside it.
+**** Language tags
+Containers tag tracks with ISO 639-2 codes (=jpn=, =eng=, =cze=/=ces=),
+the tool takes the 639-1 code Whisper uses (=ja=, =en=, =cs=).
+#+begin_src python
+ISO639 = {"ja": "jpn", "en": "eng", "cs": "cze ces", "de": "ger deu", "fr": "fre fra", "es": "spa", "it": "ita",
+          "ko": "kor", "zh": "chi zho", "ru": "rus", "pt": "por", "nl": "dut nld", "pl": "pol", "sv": "swe",
+          "da": "dan", "fi": "fin", "no": "nor", "hu": "hun", "tr": "tur", "el": "gre ell", "uk": "ukr",
+          "sk": "slo slk", "ro": "rum ron", "bg": "bul", "hr": "hrv", "sr": "srp", "sl": "slv", "th": "tha",
+          "vi": "vie", "id": "ind", "ar": "ara", "he": "heb", "hi": "hin"}
+def same_lang(tag, lang):
+    tag = (tag or "").lower(); lang = lang.lower()
+    return tag == lang or tag in ISO639.get(lang, "").split()
+#+end_src
+**** Stream listing
+#+begin_src python
+def ffprobe_streams(path):
+    import subprocess
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                          "stream=index,codec_type,codec_name:stream_tags=language,title:stream_disposition=forced,default",
+                          "-of", "json", path], capture_output=True, text=True).stdout
+    res = []
+    for st in json.loads(out or "{}").get("streams", []):
+        tags = st.get("tags", {}) or {}; disp = st.get("disposition", {}) or {}
+        res.append(dict(index=st["index"], type=st["codec_type"], codec=st.get("codec_name", "?"),
+                        lang=tags.get("language", "und"), title=tags.get("title", ""),
+                        forced=bool(disp.get("forced")), default=bool(disp.get("default"))))
+    return res
+#+end_src
+**** Cue timings from any subtitle track
+One demux pass over all subtitle streams.  Text tracks give a cue per
+packet with its duration; PGS tracks give a "show" display set (large,
+with a duration) and a ≈30-byte "clear" set — the timings are read
+from the packets, no OCR involved.
+#+begin_src python
+def scan_subtitle_cues(path):
+    import subprocess
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "s", "-show_entries",
+                          "packet=stream_index,pts_time,duration_time,size", "-of", "csv=p=0", path],
+                         capture_output=True, text=True).stdout
+    pk = {}
+    for line in out.splitlines():
+        f = line.split(",")
+        if len(f) < 4 or f[1] in ("N/A", ""): continue
+        pk.setdefault(int(f[0]), []).append((float(f[1]), None if f[2] in ("N/A", "") else float(f[2]), int(f[3])))
+    cues = {}
+    for idx, lst in pk.items():
+        lst.sort(); c = []
+        for i, (t, d, size) in enumerate(lst):
+            if size <= 200 and d is None: continue                       # PGS clear set
+            nxt = lst[i+1][0] if i+1 < len(lst) else t + 3.0
+            end = t + d if d else nxt
+            if end > nxt: end = nxt
+            if end - t >= 0.2: c.append((t, end))
+        cues[idx] = c
+    return cues
+#+end_src
+**** Choosing the tracks
+Audio: the given index, else the first stream tagged with the dub
+language, else the first.  Reference: the given file, "none" for VAD
+only, else the non-forced subtitle track with the most cues, those
+tagged with the dub language preferred; it is written as an SRT of
+empty cues into the work dir.
+#+begin_src python
+def cmd_tracks(a):
+    os.makedirs(a.work, exist_ok=True)
+    streams = ffprobe_streams(a.input); audio = [st for st in streams if st["type"] == "audio"]; subs = [st for st in streams if st["type"] == "subtitle"]
+    chosen_a = 0
+    if audio:
+        if a.astream != "": chosen_a = int(a.astream)
+        else:
+            m = [i for i, st in enumerate(audio) if same_lang(st["lang"], a.lang)]
+            chosen_a = m[0] if m else 0
+        print("audio streams of %s:" % os.path.basename(a.input))
+        for i, st in enumerate(audio):
+            print("   -a %d   %-4s %-9s %s%s" % (i, st["lang"], st["codec"], st["title"], "   <- this one will be used" if i == chosen_a else ""))
+    ref = a.ref; note = ""
+    if ref == "none": ref = ""; note = "none (VAD only)"
+    elif ref: note = os.path.basename(ref)
+    elif subs:
+        cues = scan_subtitle_cues(a.input)
+        cand = [(i, st, cues.get(st["index"], [])) for i, st in enumerate(subs)]
+        full = [c for c in cand if not c[1]["forced"] and len(c[2]) >= 50]
+        pref = [c for c in full if same_lang(c[1]["lang"], a.lang)]
+        pick = max(pref or full or cand, key=lambda c: len(c[2])) if cand else None
+        print("subtitle tracks (cue timings serve as the speech map; text is not used):")
+        for i, st, cs in cand:
+            span = "%s .. %s" % (hms(cs[0][0]), hms(cs[-1][1])) if cs else "-"
+            print("   -s:%d    %-4s %-18s %5d cues  %s%s%s" % (i, st["lang"], st["codec"], len(cs), span, "  forced" if st["forced"] else "", "   <- this one will be used" if pick and i == pick[0] else ""))
+        if pick and pick[2]:
+            ref = os.path.join(a.work, "reference-auto.srt")
+            write_srt(ref, [(s_, e_, "x") for s_, e_ in pick[2]])
+            note = "auto: track %d (%s %s, %d cues)" % (pick[0], pick[1]["lang"], pick[1]["codec"], len(pick[2]))
+        else: note = "none (no usable subtitle track: VAD only)"
+    else: note = "none (no subtitle track in the input: VAD only)"
+    with open(os.path.join(a.work, "choice.env"), "w") as f:
+        f.write("ASTREAM=%d\nREF=%s\nREFNOTE=%s\n" % (chosen_a, shell_quote(ref), shell_quote(note)))
+    print("reference: %s" % note)
+
+def shell_quote(t): return "'" + t.replace("'", "'\\''") + "'"
+#+end_src
 *** Probes
 Cheap experiments that tell which option values fit the film, run
 before the real transcription.
@@ -628,32 +744,36 @@ GREEN, YELLOW, RED, DIM, RESET = "\033[32m", "\033[33m", "\033[31m", "\033[2m", 
 def verdict_table(rows, args_line):
     colour = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
     def c(col, t): return (col + t + RESET) if colour else t
-    print("\n%-4s %-10s %-22s %s" % ("", "option", "in force", "verdict"))
+    w = max(8, min(48, max(len(cur) for _, _, cur, _ in rows)))
+    print("\n%-4s %-6s %-*s %s" % ("", "option", w, "in force", "verdict"))
     for level, opt, cur, text in rows:
         mark = {"ok": c(GREEN, "OK  "), "hint": c(YELLOW, "HINT"), "fix": c(RED, "FIX "), "na": c(DIM, "n/a ")}[level]
-        print("%s %-10s %-22s %s" % (mark, opt, cur, text if level != "ok" else c(GREEN, text)))
+        print("%s %-6s %-*s %s" % (mark, opt, w, cur, text if level != "ok" else c(GREEN, text)))
     print("\nnext: subtitles.sh %s" % args_line)
 
 def probe_all(a, x, sr, total, cues, vad, regions, cfg, names):
     rows = []; rec = {}
-    # -a: audio streams (list handed over by the shell)
-    streams = [tuple(t.split(":")) for t in a.streams.split(",") if t] if a.streams else []
-    if len(streams) > 1:
-        match = [int(i) for i, lang, codec in streams if lang == a.lang]
-        if a.astream in match or not match: rows.append(("ok", "-a", str(a.astream), "stream %d is tagged %s" % (a.astream, dict((int(i), l) for i, l, _ in streams).get(a.astream, "?"))))
-        else: rows.append(("fix", "-a", str(a.astream), "stream %d is tagged %s; stream %d is tagged %s" % (a.astream, dict((int(i), l) for i, l, _ in streams)[a.astream], match[0], a.lang))); rec["-a"] = str(match[0])
-    else: rows.append(("ok", "-a", str(a.astream), "the only audio stream"))
+    # -a: audio stream, as resolved by the tracks step (given or auto)
+    audio = [st for st in ffprobe_streams(a.input) if st["type"] == "audio"]
+    if len(audio) > 1:
+        cur = audio[a.astream] if a.astream < len(audio) else None
+        match = [i for i, st in enumerate(audio) if same_lang(st["lang"], a.lang)]
+        if cur and (same_lang(cur["lang"], a.lang) or not match): rows.append(("ok", "-a", "%d%s" % (a.astream, " (auto)" if a.astream_auto else ""), "stream %d is tagged %s" % (a.astream, cur["lang"])))
+        elif cur: rows.append(("fix", "-a", str(a.astream), "stream %d is tagged %s; stream %d is tagged %s" % (a.astream, cur["lang"], match[0], a.lang))); rec["-a"] = str(match[0])
+        else: rows.append(("fix", "-a", str(a.astream), "no such audio stream (there are %d)" % len(audio))); rec["-a"] = str(match[0] if match else 0)
+    else: rows.append(("ok", "-a", "0", "the only audio stream"))
     # -r / -s: timeline and coverage
     if cues:
         off = probe_timeline(cues, vad, total); share = probe_regions(cues, vad, total)
         if abs(off - 0.0) >= 0.3:
             rows.append(("fix", "-s", "%+.1f" % a.shift, "reference is %+.1f s off the audio: use -s %+.1f" % (off, a.shift + off))); rec["-s"] = "%+.1f" % (a.shift + off)
         else: rows.append(("ok", "-s", "%+.1f" % a.shift, "reference and audio on the same timeline"))
-        if share > 0.10: rows.append(("hint", "-r", os.path.basename(a.ref), "%.0f%% of the speech lies outside its cues; VAD fills it, but check the file" % (100*share)))
-        else: rows.append(("ok", "-r", os.path.basename(a.ref), "covers %.0f%% of the speech" % (100*(1-share))))
+        label = a.ref_note or os.path.basename(a.ref)
+        if share > 0.10: rows.append(("hint", "-r", label, "%.0f%% of the speech lies outside its cues; VAD fills it, but check the file" % (100*share)))
+        else: rows.append(("ok", "-r", label, "covers %.0f%% of the speech" % (100*(1-share))))
     else:
         probe_regions(cues, vad, total)
-        rows.append(("hint", "-r", "none", "no reference: regions from VAD only (fine, but cue snapping is off)"))
+        rows.append(("hint", "-r", a.ref_note or "none", "no reference: regions from VAD only (fine, but cue snapping is off)"))
         rows.append(("na", "-s", "-", "no reference to shift"))
     # -l: language, with the current model loaded once
     model = load_model(a.model)
@@ -677,11 +797,11 @@ def probe_all(a, x, sr, total, cues, vad, regions, cfg, names):
     parts = []
     for opt, val in [("-a", rec.get("-a")), ("-l", rec.get("-l")), ("-s", rec.get("-s")), ("-m", rec.get("-m"))]:
         if val: parts.append("%s %s" % (opt, val))
-    if a.ref: parts.append("-r \"%s\"" % a.ref)
+    if a.ref and not (a.ref_note or "").startswith("auto"): parts.append("-r \"%s\"" % a.ref)
     if a.shift and "-s" not in rec: parts.append("-s %+.1f" % a.shift)
     if a.names_spec: parts.append("-n \"%s\"" % a.names_spec)
     elif top: parts.append("-n \"<pick from: %s>\"" % ",".join(top))
-    if a.astream and "-a" not in rec: parts.append("-a %d" % a.astream)
+    if not a.astream_auto and "-a" not in rec and len(audio) > 1: parts.append("-a %d" % a.astream)
     if a.model != "large-v3" and "-m" not in rec: parts.append("-m %s" % a.model)
     verdict_table(rows, " ".join(parts) + " \"%s\"" % a.input)
 #+end_src
@@ -760,10 +880,13 @@ def main():
     p = sub.add_parser("probe", parents=[common], help="probe option values")
     p.add_argument("--what", required=True, choices=["timeline", "regions", "language", "models", "names", "all"])
     p.add_argument("--models", default="turbo,large-v3,medium"); p.add_argument("--samples", type=int, default=12)
-    p.add_argument("--streams", default="", help="idx:lang:codec,... as found by ffprobe"); p.add_argument("--astream", type=int, default=0)
-    p.add_argument("--names-spec", dest="names_spec", default=""); p.add_argument("--input", default="INPUT")
+    p.add_argument("--astream", type=int, default=0); p.add_argument("--astream-auto", dest="astream_auto", action="store_true")
+    p.add_argument("--ref-note", dest="ref_note", default=""); p.add_argument("--names-spec", dest="names_spec", default=""); p.add_argument("--input", default="INPUT")
+    t = sub.add_parser("tracks", help="list the container's tracks, pick audio and reference, write choice.env")
+    t.add_argument("--input", required=True); t.add_argument("--lang", default="ja"); t.add_argument("--work", required=True)
+    t.add_argument("--astream", default=""); t.add_argument("--ref", default="")
     a = ap.parse_args()
-    (cmd_run if a.cmd == "run" else cmd_probe)(a)
+    {"run": cmd_run, "probe": cmd_probe, "tracks": cmd_tracks}[a.cmd](a)
 
 if __name__ == "__main__":
     main()
@@ -789,10 +912,12 @@ set -e
 #+end_src
 *** Defaults
 Every option has a default so that =subtitles.sh INPUT= alone does a
-sensible thing: Japanese, VAD-only regions, one unprompted pass with
-large-v3, output beside the input.
+sensible thing: Japanese, the audio stream tagged =ja= and the fullest
+subtitle track of the container as the timing reference (VAD only
+when there is none), one unprompted pass with large-v3, output beside
+the input.  An empty =ASTREAM= or =REF= means "choose automatically".
 #+begin_src bash
-LANGCODE="ja"; REF=""; SHIFT="0"; NAMES=""; MODEL="large-v3"; ASTREAM=0
+LANGCODE="ja"; REF=""; SHIFT="0"; NAMES=""; MODEL="large-v3"; ASTREAM=""
 OUT=""; WORK=""; FORCE=""; MKVOUT=""; PROBE=""; SAMPLES=12; MODELS="turbo,large-v3,medium"
 #+end_src
 *** Help
@@ -822,20 +947,23 @@ lines); the work dir keeps the VAD and both Whisper passes as a cache.
 Options (default in brackets):
   -h            this help
   -p            probe: run every probe, print the verdict and the next command
-  -P WHAT       one probe only: streams  audio streams of INPUT (for -a)
+  -P WHAT       one probe only: streams  audio and subtitle tracks of INPUT
                                 timeline offset of REF.srt vs the speech (for -s)
                                 regions  how much speech REF.srt covers
                                 language Whisper language detection (for -l)
                                 models   sample-transcribe with -L (for -m)
                                 names    character-name candidates (for -n)
   -l LANG       language of the dub, ISO code [ja]
-  -r REF.srt    reference subtitles with usable timings [none: VAD only]
-  -s SECONDS    shift REF.srt by this much before use, + = later [0]
+  -r REF.srt    reference subtitles with usable timings [the fullest subtitle
+                track inside INPUT, PGS or text — only its timings are used;
+                "-r none" for VAD only]
+  -s SECONDS    shift the reference by this much before use, + = later [0]
   -n NAMES      character names for the transcription prompt, comma-separated
                 [none: a single unprompted pass]; a name may carry variants to
                 normalise to it:  正=誤1|誤2
   -m MODEL      Whisper model: turbo, large-v3, medium, small ... [large-v3]
-  -a N          audio stream index inside a container [0]
+  -a N          audio stream index inside a container [the first stream
+                tagged with LANG, else 0]
   -o OUT.srt    output file [INPUT-basename.LANG.srt beside the input]
   -w DIR        work dir with the cache [/tmp/subtitles/INPUT-basename]
   -f            force re-transcription, ignore the cached passes
@@ -844,9 +972,12 @@ Options (default in brackets):
   -S N          sample regions used by the probes [12]
   -L MODELS     models tried by the models probe [turbo,large-v3,medium]
 
-Typical sequence for a new film:
-  subtitles.sh -p -r wrong-but-timed.srt film.mkv
-  subtitles.sh -a 2 -r wrong-but-timed.srt -s 10.8 -n "名1=誤,名2" -M "film +ja.mkv" film.mkv
+Typical sequence for a new film (the MKV carries the dub and a subtitle track):
+  subtitles.sh -p film.mkv
+  subtitles.sh -n "名1=誤,名2" -M "film +ja.mkv" film.mkv
+With a separate audio file and reference:
+  subtitles.sh -p -r wrong-but-timed.srt dub.aac
+  subtitles.sh -r wrong-but-timed.srt -s 10.8 -n "名1=誤,名2" dub.aac
 HELP
     exit 1
 }
@@ -894,7 +1025,7 @@ then
     echo "Error: input audio or video file required."
     help
 fi
-if [ ! -z "$REF" ] && [ ! -f "$REF" ]
+if [ ! -z "$REF" ] && [ "$REF" != "none" ] && [ ! -f "$REF" ]
 then
     echo "Error: reference SRT not found: $REF"
     exit 1
@@ -909,20 +1040,6 @@ DIR="$(cd "$(dirname "$INPUT")" && pwd)"
 [ -z "$WORK" ] && WORK="/tmp/subtitles/$BASE"
 REPORT="${OUT%.srt}_review.txt"
 mkdir -p "$WORK"
-#+end_src
-*** Probe: audio streams
-Needs only =ffprobe=; answered before anything else is set up.  The
-master probe gets the same list handed over as =idx:lang:codec,...=.
-#+begin_src bash
-STREAMS="$(ffprobe -v error -select_streams a -show_entries stream=index,codec_name,channels:stream_tags=language -of csv=p=0 "$INPUT" 2>/dev/null \
-        | awk -F, '{printf "%s%d:%s:%s", (NR>1?",":""), NR-1, ($4==""?"und":$4), $2}')"
-if [ "$PROBE" = "streams" ] || [ "$PROBE" = "all" ]
-then
-    echo "streams: audio streams of $INPUT (index for -a, language, codec, channels, title)"
-    ffprobe -v error -select_streams a -show_entries stream=index,codec_name,channels:stream_tags=language,title -of csv=p=0 "$INPUT" \
-        | awk -F, '{printf "   -a %d   %-4s %-8s %s ch  %s\n", NR-1, ($4==""?"und":$4), $2, $3, $5}'
-    [ "$PROBE" = "streams" ] && exit 0
-fi
 #+end_src
 *** The Whisper venv
 Created on first use on top of the system PyTorch (which carries the
@@ -945,6 +1062,20 @@ then
 fi
 PY="$VENV/bin/python"
 WHISPERPY="$(command -v subtitles-whisper.py)"
+#+end_src
+*** Track selection
+Lists the container's audio and subtitle tracks, marks the ones that
+will be used, and resolves =ASTREAM= and =REF= when they were left to
+the automatic choice (=choice.env= is written by the Python half).
+=-P streams= stops here.
+#+begin_src bash
+echo "-------------------------"
+echo "Tracks of $INPUT (language $LANGCODE)"
+echo "-------------------------"
+"$PY" "$WHISPERPY" tracks --input "$INPUT" --lang "$LANGCODE" --work "$WORK" --astream "$ASTREAM" --ref "$REF"
+ASTREAM_AUTO=""; [ -z "$ASTREAM" ] && ASTREAM_AUTO="--astream-auto"
+. "$WORK/choice.env"
+[ "$PROBE" = "streams" ] && exit 0
 #+end_src
 *** Decode the audio
 Any container or codec =ffmpeg= reads; =-a N= selects the audio track
@@ -969,14 +1100,14 @@ then
     echo "-------------------------"
     "$PY" "$WHISPERPY" probe --what "$PROBE" --audio "$WAV" --lang "$LANGCODE" "${REFOPT[@]}" \
         --model "$MODEL" --models "$MODELS" --samples "$SAMPLES" --work "$WORK" \
-        --streams "$STREAMS" --astream "$ASTREAM" --names-spec "$NAMES" --input "$INPUT"
+        --astream "$ASTREAM" $ASTREAM_AUTO --ref-note "$REFNOTE" --names-spec "$NAMES" --input "$INPUT"
     exit 0
 fi
 #+end_src
 *** Transcribe and build
 #+begin_src bash
 echo "-------------------------"
-echo "Transcribing ($MODEL, $LANGCODE) — regions from ${REF:-VAD only}; work dir $WORK"
+echo "Transcribing ($MODEL, $LANGCODE) — reference $REFNOTE; work dir $WORK"
 echo "-------------------------"
 "$PY" "$WHISPERPY" run --audio "$WAV" --lang "$LANGCODE" "${REFOPT[@]}" \
     --names "$NAMES" --model "$MODEL" --work "$WORK" --out "$OUT" --report "$REPORT" $FORCE
