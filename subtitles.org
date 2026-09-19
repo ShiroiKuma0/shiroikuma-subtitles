@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.6.0 - description
+* subtitles - version 1.7.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -45,13 +45,18 @@ builds subtitles from the dub's own word timestamps.
    short ones join the nearest voice heard nearby; a change of voice
    inside a cue is placed at a legal token boundary near the silence.
    Reliable on a scene, not yet on a whole film — see the changelog.
-6. Subtitle lines from word timestamps: cut at sentence ends, pauses
-   ≥ 0.7 s, the reference cue boundaries and a length cap; starts and
-   ends snapped to reference cues when within 0.3 s; ≥ 1.2 s on screen,
-   ≤ 2 lines (16 characters for Japanese, 42 for Latin scripts);
-   trailing 。 removed for Japanese.  With =-d on=, a cue holding two
-   speakers puts each on its own line; when that does not fit two lines
-   it becomes two cues.
+6. Assembly, driven by the reference: one cue per reference cue.  The
+   words are apportioned to the cues at the best legal token boundary
+   within ±1 s of each reference edge — sentence punctuation or a pause
+   preferred, never inside a word.  A cue keeps the reference timing,
+   extended only where Whisper hears the speech continue past it.  Two
+   sentences, or a turn, inside one reference cue go on two lines, as
+   on the disc; longer text breaks at punctuation or a particle, never
+   inside a katakana or kanji run; ≤ 2 lines (16 characters for
+   Japanese, 42 for Latin scripts), else the cue is split in two.
+   Speech the reference has no cue for is cut at pauses ≥ 0.7 s and
+   sentence ends into cues of its own.  Without a reference everything
+   goes that way.
 7. Checks: VAD speech left without a line, the lowest-confidence lines,
    written to a review report beside the SRT.
 
@@ -130,12 +135,16 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   installed system-wide (torch 2.13+cu130 on kumatux).
 - A venv on top of the system PyTorch, created automatically on first
   run at =$KXWHISPERVENV= (default =~/.venvs/whisper=):
-  =python3 -m venv --system-site-packages ~/.venvs/whisper && ~/.venvs/whisper/bin/pip install openai-whisper silero-vad speechbrain scipy=
+  =python3 -m venv --system-site-packages ~/.venvs/whisper && ~/.venvs/whisper/bin/pip install openai-whisper silero-vad speechbrain fugashi unidic-lite scipy=
+  (fugashi + unidic-lite = MeCab, for Japanese word boundaries)
 - The Whisper model (large-v3, 2.9 GB) is downloaded on first use into
   =~/.cache/whisper=; the ECAPA speaker model (80 MB) into the work
   dir's parent =/tmp/subtitles/models=.
 
 * Changelog
+** 1.7.0
+*** 2026-09-19_09-48-29 UTC (土曜日)
+**** Reference-driven assembly: one cue per reference cue with the reference timing (extended only where Whisper hears speech continue), the words apportioned at the best legal token boundary near each reference edge; two sentences or a turn inside one reference cue on two lines; speech without a reference cue still gets its own cues. Fixes cues that merged two speakers and cues cut off before the speech ends. Splits and line breaks only at MeCab word boundaries that begin a bunsetsu (fugashi + unidic-lite), preferring the position after a particle or auxiliary.
 ** 1.6.0
 *** 2026-09-18_21-32-41 UTC (金曜日)
 **** Speaker separation, experimental and OFF by default (-d on): every VAD phrase gets an ECAPA voice embedding (SpeechBrain), long phrases are clustered over the film, short ones join the nearest local voice, and a cue holding two clearly different voices puts each on its own line. On a 3-minute scene it separates four speakers correctly; over a whole film it is not reliable yet (Whisper's Japanese token times are too coarse to place the change between the right tokens, sub-second phrases give noisy embeddings), so it stays opt-in until a forced aligner and a real diarization pipeline are added.
@@ -494,7 +503,7 @@ def make_phrases(x, sr, segs, cache, cues=()):
             for k in groups[0][1]: assign[k] = groups[1][0]
         if len(groups) > 1 and len(groups[-1][1]) < lim:
             for k in groups[-1][1]: assign[k] = groups[-2][0]
-        for w, j in zip(ws, assign): phr[j]["words"].append(w)
+        for w, j in zip(ws, assign): phr[j]["words"].append(w); w["phr"] = j
     phr = [p_ for p_ in phr if p_["words"]]
     for p_ in phr: p_["end"] = min(p_["end"], max(w["end"] for w in p_["words"]) + 0.05); p_["start"] = max(p_["start"], min(w["start"] for w in p_["words"]) - 0.05)
     return phr, bounds
@@ -613,6 +622,67 @@ def label_speakers(x, sr, segs, cache, cues=()):
     smooth_labels(segs, bounds)
     return max(lab) if lab else 0
 #+end_src
+*** Word boundaries
+Whisper's Japanese "words" are sub-word pieces (お|前, 頼|む), so a
+split or a line break needs real word boundaries: MeCab (fugashi with
+unidic-lite) segments the text and tags parts of speech.  A boundary
+is allowed at a word start that begins a new bunsetsu — not before a
+particle, an auxiliary, a suffix, or a verb attached by て/で — and
+scores a bonus after a particle, an auxiliary or punctuation.  Without
+fugashi (or for other languages) the kana/kanji heuristics apply.
+**** Analyser
+#+begin_src python
+_TAGGER = None
+def tagger():
+    global _TAGGER
+    if _TAGGER is None:
+        try:
+            from fugashi import Tagger; _TAGGER = Tagger()
+        except Exception: _TAGGER = False
+    return _TAGGER or None
+
+ATTACH_NEXT = {"助詞", "助動詞", "接尾辞"}                       # a word of this kind hangs on the previous one
+FORMAL_NOUNS = {"限り", "こと", "もの", "とき", "時", "ため", "はず", "わけ", "つもり", "ところ", "うち", "せい", "よう", "そう", "まま", "ほう", "方"}
+HEAD_POS = {"名詞", "代名詞", "動詞", "形容詞", "副詞", "接続詞", "感動詞", "連体詞", "接頭辞", "形状詞", "記号", "補助記号"}
+
+def ja_boundaries(text):
+    """-> {char offset: bonus} for every allowed boundary inside text (a bonus < 0 marks a bunsetsu end)"""
+    tg = tagger()
+    if tg is None: return None
+    words = [(w.surface, w.feature.pos1) for w in tg(text)]
+    out = {}; off = 0; prev = None
+    for surf, pos in words:
+        if prev is not None and off > 0:
+            ps, pp = prev
+            ok = pos not in ATTACH_NEXT and pos in HEAD_POS and pp != "接頭辞"
+            if ok and pos == "動詞" and pp == "助詞" and ps in ("て", "で"): ok = False
+            if ok and pos == "名詞" and surf in FORMAL_NOUNS and pp in ("動詞", "形容詞", "助動詞", "形状詞"): ok = False
+            if ok:
+                bonus = -0.4 if pp in ("助詞", "助動詞") or pp in ("補助記号", "記号") else (-0.2 if pp in ("動詞", "形容詞") else 0.0)
+                out[off] = bonus
+        off += len(surf); prev = (surf, pos)
+    return out
+#+end_src
+**** Marking the tokens
+Every token gets =wb=: the boundary bonus at its start when a line may
+start there, =None= when it may not; tokens across segment edges always
+may.
+#+begin_src python
+def mark_word_boundaries(segs, cfg):
+    for seg in segs:
+        ws = [w for w in seg["words"] if w["w"].strip()]
+        if not ws: continue
+        if cfg["spaces"]:
+            for k, w in enumerate(ws): w["wb"] = 0.0 if k else -0.4
+            continue
+        text = "".join(w["w"].strip() for w in ws); jb = ja_boundaries(text)
+        off = 0
+        for k, w in enumerate(ws):
+            if k == 0: w["wb"] = -0.4
+            elif jb is None: w["wb"] = None if illegal_chars(ws[k-1], w) else 0.0
+            else: w["wb"] = jb.get(off)
+            off += len(w["w"].strip())
+#+end_src
 *** Subtitle building
 **** Units from word timestamps
 A unit ends at sentence punctuation, at a pause ≥ =PAUSE_SPLIT=, at a
@@ -663,10 +733,17 @@ def break_lines(t, cfg):
             score = abs(len(a)-len(b)) + (0 if re.search(r"[,.;:!?]$", a) else 4)
             if best is None or score < best[0]: best = (score, a + "\n" + b)
         return best[1]
-    best = None; mid = len(t)/2
-    for i in range(6, len(t)-5):
-        ch = t[i-1]
-        score = abs(i-mid) + (0 if ch in "、。，！？" else (3 if ch in "はがをにでへもの" else 8))
+    best = None; mid = len(t)/2; jb = ja_boundaries(t)
+    for i in range(3, len(t)-2):
+        if jb is not None:
+            if i not in jb: continue
+            score = abs(i-mid) + 6*jb[i]/0.4 + 4      # a bunsetsu end costs 4 less than a plain word start
+            over = max(0, i-n) + max(0, len(t)-i-n); score += 5*over
+        else:
+            ch, nx = t[i-1], t[i]
+            if (is_kata(ch) and is_kata(nx)) or (is_kanji(ch) and is_kanji(nx)) or nx in NO_LINE_START: continue
+            score = abs(i-mid) + (0 if ch in "、。，！？" else (3 if ch in "はがをにでへもの" else 8))
+            over = max(0, i-n) + max(0, len(t)-i-n); score += 5*over
         if best is None or score < best[0]: best = (score, i)
     i = best[1] if best else int(mid)
     return t[:i] + "\n" + t[i:]
@@ -739,6 +816,154 @@ def build_cues(units, cues, cfg):
         if a["end"] > b["start"]-GAP: a["end"] = max(a["start"]+0.5, b["start"]-GAP)
     return [(c["start"], c["end"], c["text"] if c["multi"] else break_lines(c["text"], cfg), c["logprob"], c["multi"]) for c in merged]
 #+end_src
+*** Reference-driven assembly
+**** Apportioning words to the reference cues
+For every boundary between two consecutive reference cues, the words
+are split at the best legal token boundary within ±=APPORTION_WIN= s of
+the reference edge: closeness in time, with bonuses for a real silence
+between the tokens (the fine VAD phrases — Whisper compresses pauses
+into the neighbouring tokens), for sentence punctuation and for a
+pause; when no legal boundary lies within the window the search
+widens to twice it, and only then is an illegal position accepted.
+Whole phrases far from any cue (≥ =OUTSIDE_GAP= s beyond the cue's
+edges, detached at a real gap of ≥ 0.5 s) are left for the free
+assembly.
+#+begin_src python
+APPORTION_WIN, OUTSIDE_GAP = 1.0, 1.5
+
+def illegal_chars(a, b):
+    ta, tb = a["w"].strip(), b["w"].strip()
+    return (not tb or tb[:1] in NO_LINE_START or (ta and ((is_kata(ta[-1]) and is_kata(tb[0])) or (is_kanji(ta[-1]) and is_kanji(tb[0])))))
+
+def illegal(a, b):
+    if "wb" in b and a.get("seg") == b.get("seg"): return b["wb"] is None
+    return illegal_chars(a, b)
+
+def boundary_score(words, j, B, cfg):
+    """lower is better: distance from the wanted time, minus bonuses for a real silence, sentence punctuation, a pause"""
+    a, b = words[j-1], words[j]
+    t = (a["end"] + b["start"])/2; sc = abs(t - B)
+    if a.get("phr") is not None and a.get("phr") != b.get("phr"): sc -= 0.6      # a VAD silence lies between the tokens
+    if b.get("wb"): sc += b["wb"]                                                  # bunsetsu end before it
+    if re.search("[" + re.escape(cfg["punct_end"]) + "]$", a["w"].strip()): sc -= 0.5
+    if b["start"] - a["end"] >= 0.3: sc -= 0.3
+    if illegal(a, b): sc += 3.0
+    return sc
+
+def apportion(words, cues, cfg):
+    """-> list of word lists, one per reference cue (may be empty), plus the words outside all cues"""
+    n = len(words); groups = [[] for _ in cues]; outside = []; k = 0
+    for i, (s_, e_, _) in enumerate(cues):
+        nxt = cues[i+1][0] if i+1 < len(cues) else None
+        B = (e_ + nxt)/2 if nxt is not None and nxt > e_ else (e_ if nxt is None else e_)
+        # words clearly before this cue that were not taken by the previous one — whole phrases only (a real gap follows)
+        while k < n and words[k]["end"] < s_ - OUTSIDE_GAP and k+1 < n and words[k+1]["start"] - words[k]["end"] >= 0.5 and not illegal(words[k], words[k+1]):
+            outside.append(words[k]); k += 1
+        while k < n and words[k]["end"] < s_ - OUTSIDE_GAP:
+            j = k+1
+            while j < n and not (words[j]["start"] - words[j-1]["end"] >= 0.5 and not illegal(words[j-1], words[j])): j += 1
+            if j < n and words[j-1]["end"] < s_ - OUTSIDE_GAP: outside += words[k:j]; k = j
+            else: break
+        if nxt is None: end = n
+        else:
+            near = lambda win: [j for j in range(k+1, n) if abs((words[j-1]["end"] + words[j]["start"])/2 - B) <= win]
+            legal = [j for j in near(APPORTION_WIN) if not illegal(words[j-1], words[j])] or [j for j in near(2*APPORTION_WIN) if not illegal(words[j-1], words[j])]
+            cand = legal or near(APPORTION_WIN)
+            if cand: end = min(cand, key=lambda j: boundary_score(words, j, B, cfg))
+            else:
+                # no token boundary near the reference edge: split where the words are, on its side of the edge
+                end = k
+                while end < n and (words[end]["start"] + words[end]["end"])/2 < B: end += 1
+        g = words[k:end]; k = end
+        # words far past this cue's end belong to nobody (speech without a reference cue) — whole phrases only
+        while g:
+            j = len(g) - 1
+            while j > 0 and not (g[j]["start"] - g[j-1]["end"] >= 0.5 and not illegal(g[j-1], g[j])): j -= 1
+            if j > 0 and g[j]["start"] > e_ + OUTSIDE_GAP: outside += g[j:]; del g[j:]
+            else: break
+        groups[i] = g
+    outside += words[k:]
+    outside.sort(key=lambda w: w["start"])
+    return groups, outside
+#+end_src
+**** Lines inside a reference cue
+Two sentences or a turn inside one cue go on two lines, as on the
+disc: a line ends at sentence punctuation followed by a pause, or at a
+pause ≥ =TURN_GAP= s, or at a Whisper segment edge with a pause.
+Otherwise the text is broken by length.  More than two lines' worth
+becomes two cues, split at the best boundary.
+#+begin_src python
+TURN_GAP = 0.25
+
+def turn_points(ws, cfg):
+    pts = []
+    for j in range(1, len(ws)):
+        a, b = ws[j-1], ws[j]; gap = b["start"] - a["end"]
+        punct = bool(re.search("[" + re.escape(cfg["punct_end"]) + "]$", a["w"].strip()))
+        newseg = a.get("seg") is not None and a.get("seg") != b.get("seg")
+        silence = a.get("phr") is not None and a.get("phr") != b.get("phr")
+        if ((punct and (gap >= 0.08 or silence)) or gap >= TURN_GAP or (newseg and (gap >= 0.12 or silence))) and not illegal(a, b):
+            pts.append(j)
+    return pts
+
+def cue_text(ws, cfg):
+    """-> list of lines (1 or 2), or None when the text needs two cues"""
+    n = cfg["maxline"]; pts = turn_points(ws, cfg)
+    full = clean_text(ws, cfg)
+    if len(full) <= n and not pts: return [full]
+    if pts:
+        j = pts[len(pts)//2] if len(pts) > 1 else pts[0]
+        a, b = clean_text(ws[:j], cfg), clean_text(ws[j:], cfg)
+        if len(a) <= n and len(b) <= n: return [a, b]
+    if len(full) <= 2*n: return break_lines(full, cfg).split("\n")
+    return None
+
+def split_cue(ws, cfg):
+    """best token boundary to divide an overlong cue in two"""
+    mid = (ws[0]["start"] + ws[-1]["end"])/2
+    return min(range(1, len(ws)), key=lambda j: boundary_score(ws, j, mid, cfg))
+#+end_src
+**** Timing and output
+The reference timing is kept; the start moves earlier and the end
+later only when Whisper places words outside it; neighbouring cues
+never overlap.
+#+begin_src python
+def conf(ws):
+    """mean word probability of a cue (0..1)"""
+    p = [w.get("p", 1.0) for w in ws]; return sum(p)/len(p) if p else 1.0
+
+def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None):
+    for si, seg in enumerate(segs):
+        for w in seg["words"]: w["seg"] = si
+    if x is not None: make_phrases(x, sr, segs, os.path.join(work, "vad_fine.json"))   # sets w["phr"]
+    mark_word_boundaries(segs, cfg)
+    words = sorted((w for seg in segs for w in seg["words"] if w["w"].strip()), key=lambda w: w["start"])
+    groups, outside = apportion(words, cues, cfg)
+    out = []
+    for (s_, e_, _), g in zip(cues, groups):
+        if not g: continue
+        st = min(s_, g[0]["start"] - LEAD); en = max(e_, g[-1]["end"] + LINGER)
+        lines = cue_text(g, cfg)
+        if lines is None:
+            j = split_cue(g, cfg); ga, gb = g[:j], g[j:]
+            tb = (ga[-1]["end"] + gb[0]["start"])/2
+            out.append(dict(start=st, end=max(tb - GAP, st + MIN_DUR), text="\n".join(cue_text(ga, cfg) or [clean_text(ga, cfg)]), logprob=conf(ga), multi=False))
+            out.append(dict(start=tb, end=en, text="\n".join(cue_text(gb, cfg) or [clean_text(gb, cfg)]), logprob=conf(gb), multi=False))
+        else:
+            out.append(dict(start=st, end=en, text="\n".join(lines), logprob=conf(g), multi=len(lines) == 2 and len(turn_points(g, cfg)) > 0))
+    # speech the reference has no cue for
+    if outside:
+        free = build_cues(make_units([dict(words=outside, avg_logprob=0.0, text="")], [], cfg), [], cfg)
+        out += [dict(start=a, end=b, text=t, logprob=lp, multi=m) for a, b, t, lp, m in free]
+    out.sort(key=lambda c: c["start"])
+    for c in out:
+        if c["end"] - c["start"] < MIN_DUR: c["end"] = c["start"] + MIN_DUR
+    for a, b in zip(out, out[1:]):
+        if a["end"] > b["start"] - GAP:
+            a["end"] = max(a["start"] + 0.5, b["start"] - GAP)
+            if a["end"] > b["start"] - GAP: b["start"] = min(a["end"] + GAP, b["end"] - 0.5)
+    return [(c["start"], c["end"], c["text"], c["logprob"], c["multi"]) for c in out]
+#+end_src
 *** Review report
 VAD speech left without a line, the lowest-confidence lines, and
 every dropped segment with its reason.
@@ -749,15 +974,15 @@ def uncovered(cues, vad):
     return [(s, e) for s, e in vad if e-s >= 0.8 and int(e*10) < len(cov) and cov[int(s*10):int(e*10)].mean() < 0.3]
 
 def write_report(path, cues, vad, used, dropped, ref_count):
-    miss = uncovered(cues, vad); low = [c for c in cues if c[3] < LOW_CONF]; multi = [c for c in cues if c[4]]
+    miss = uncovered(cues, vad); low = [c for c in cues if (c[3] < LOW_CONF if c[3] <= 0 else c[3] < 0.5)]; multi = [c for c in cues if c[4]]
     with open(path, "w", encoding="utf-8") as f:
-        f.write("subtitles: %d cues written (reference had %d), %d with two speakers on separate lines\n" % (len(cues), ref_count, sum(1 for c in cues if c[4])))
+        f.write("subtitles: %d cues written (reference had %d), %d two-line at a turn or sentence end\n" % (len(cues), ref_count, sum(1 for c in cues if c[4])))
         f.write("regions from the prompted pass: %d, from the unprompted pass: %d\n" % (used["prompt"], used["noprompt"]))
         f.write("VAD speech >= 0.8 s without a subtitle: %d chunks, %.1f min\n\n" % (len(miss), sum(e-s for s, e in miss)/60))
         for s, e in miss: f.write("   %s - %s (%.1f s)\n" % (hms(s), hms(e), e-s))
-        f.write("\nLowest-confidence lines (avg logprob < %.1f): %d\n\n" % (LOW_CONF, len(low)))
+        f.write("\nLowest-confidence lines (mean word probability below 50%%, or segment logprob < %.1f): %d\n\n" % (LOW_CONF, len(low)))
         for s, e, t, lp, _ in low: f.write("%s --> %s  (%.2f)  %s\n" % (fmt_time(s), fmt_time(e), lp, t.replace("\n", " / ")))
-        f.write("\nTwo-speaker cues (check a few — a wrong one means one voice was heard as two): %d\n\n" % len(multi))
+        f.write("\nTwo-line cues at a turn or sentence end inside one reference cue: %d\n\n" % len(multi))
         for s, e, t, lp, _ in multi: f.write("%s --> %s  %s\n" % (fmt_time(s), fmt_time(e), t.replace("\n", " / ")))
         f.write("\nDropped Whisper segments: %d\n\n" % len(dropped))
         for seg, why in dropped: f.write("%s --> %s  [%s]  %s\n" % (fmt_time(seg["start"]), fmt_time(seg["end"]), why, seg["text"].strip()))
@@ -826,8 +1051,10 @@ def scan_subtitle_cues(path):
 Audio: the given index, else the first stream tagged with the dub
 language, else the first.  Reference: the given file, "none" for VAD
 only, else the non-forced subtitle track with the most cues, those
-tagged with the dub language preferred; it is written as an SRT of
-empty cues into the work dir.
+tagged with the dub language preferred — but a SubRip track of that
+language only when nothing else exists, since it is most likely this
+tool's own earlier output; the choice is written as an SRT of empty
+cues into the work dir.
 #+begin_src python
 def cmd_tracks(a):
     os.makedirs(a.work, exist_ok=True)
@@ -849,7 +1076,9 @@ def cmd_tracks(a):
         cand = [(i, st, cues.get(st["index"], [])) for i, st in enumerate(subs)]
         full = [c for c in cand if not c[1]["forced"] and len(c[2]) >= 50]
         pref = [c for c in full if same_lang(c[1]["lang"], a.lang)]
-        pick = max(pref or full or cand, key=lambda c: len(c[2])) if cand else None
+        # a SubRip track of the dub's language is most likely this tool's own earlier output: only when nothing else exists
+        orig = [c for c in pref if c[1]["codec"] != "subrip"] or [c for c in full if c[1]["codec"] != "subrip"]
+        pick = max(orig or pref or full or cand, key=lambda c: len(c[2])) if cand else None
         print("subtitle tracks (cue timings serve as the speech map; text is not used):")
         for i, st, cs in cand:
             span = "%s .. %s" % (hms(cs[0][0]), hms(cs[-1][1])) if cs else "-"
@@ -1100,7 +1329,8 @@ def cmd_run(a):
         print("  speakers: %d voice clusters over the film" % nspk, flush=True)
         for seg in merged:
             for w in seg["words"]: w.pop("emb", None)
-    out = build_cues(make_units(merged, cues, cfg), cues, cfg)
+    if not cues: mark_word_boundaries(merged, cfg)
+    out = assemble_by_reference(merged, cues, cfg, x, sr, a.work) if cues else build_cues(make_units(merged, cues, cfg), cues, cfg)
     write_srt(a.out, [(s, e, t) for s, e, t, _, _ in out])
     nmiss, nlow = write_report(a.report, out, vad, used, dropped, len(cues))
     print("written %s: %d cues; uncovered speech chunks %d; low-confidence lines %d; report %s" % (a.out, len(out), nmiss, nlow, a.report))
@@ -1223,9 +1453,10 @@ Options (default in brackets):
   -d on|off     EXPERIMENTAL speaker separation: two speakers inside one cue
                 go on separate lines (voice embeddings clustered over the
                 film); works on a scene, not reliably on a whole film [off]
-  -M            update the input MKV in place: the SRT is inserted before the
-                first subtitle track of LANG (text before bitmap), after all
-                subtitle tracks when there is none; the remux is verified
+  -M            update the input MKV in place: the SRT replaces the tool's
+                earlier SRT of LANG if there is one, else goes before the first
+                subtitle track of LANG (text before bitmap), after all subtitle
+                tracks when there is none; the remux is verified
                 (track list, packet counts) before it replaces the file; the
                 SRT and the review file then move into the work dir, so
                 nothing is left beside the movie [no]
@@ -1313,12 +1544,12 @@ then
     echo "Creating the Whisper venv at $VENV ..."
     echo "-------------------------"
     python3 -m venv --system-site-packages "$VENV"
-    "$VENV/bin/pip" install -q openai-whisper silero-vad speechbrain scipy
+    "$VENV/bin/pip" install -q openai-whisper silero-vad speechbrain fugashi unidic-lite scipy
 fi
-if ! "$VENV/bin/python" -c "import torch, whisper, silero_vad, speechbrain; assert torch.cuda.is_available()" 2>/dev/null
+if ! "$VENV/bin/python" -c "import torch, whisper, silero_vad, speechbrain, fugashi; assert torch.cuda.is_available()" 2>/dev/null
 then
-    echo "Error: $VENV lacks whisper/silero_vad/speechbrain or CUDA is unavailable; recreate it:"
-    echo "  python3 -m venv --system-site-packages $VENV && $VENV/bin/pip install openai-whisper silero-vad speechbrain scipy"
+    echo "Error: $VENV lacks whisper/silero_vad/speechbrain/fugashi or CUDA is unavailable; recreate it:"
+    echo "  python3 -m venv --system-site-packages $VENV && $VENV/bin/pip install openai-whisper silero-vad speechbrain fugashi unidic-lite scipy"
     exit 1
 fi
 PY="$VENV/bin/python"
@@ -1376,9 +1607,10 @@ SPKOPT="--no-speakers"; [ "$SPEAKERS" = "on" ] && SPKOPT=""
 #+end_src
 *** Optional: update the MKV in place
 The new SRT becomes a subtitle track of the input itself.  Position:
-before the first subtitle track tagged with the dub's language, so
-that text precedes bitmap within the language; after all subtitle
-tracks when there is none.  The remux goes to a temporary file next
+in place of the tool's own earlier SRT track of that language when
+there is one (it is replaced), else before the first subtitle track
+tagged with the dub's language, so that text precedes bitmap within
+the language; after all subtitle tracks when there is none.  The remux goes to a temporary file next
 to the input, is verified — the same tracks in the new order plus
 one, every video and audio stream with its packet count unchanged —
 and only then replaces the original.
@@ -1398,9 +1630,13 @@ same = lambda t: (t or "").lower() == lang or (t or "").lower() in iso.get(lang,
 ids = [t["id"] for t in d["tracks"]]
 subs = [t["id"] for t in d["tracks"] if t["type"] == "subtitles"]
 own = [i for i in subs if same(d["tracks"][ids.index(i)]["properties"].get("language"))]
-at = own[0] if own else (subs[-1] + 1 if subs else len(ids))
-order = ["0:%d" % i for i in ids if i < at] + ["1:0"] + ["0:%d" % i for i in ids if i >= at]
-print(",".join(order))' "$LANGCODE")"
+old = [i for i in own if d["tracks"][ids.index(i)]["codec"].startswith("SubRip")]   # the tool'"'"'s own earlier SRT: replaced
+at = old[0] if old else (own[0] if own else (subs[-1] + 1 if subs else len(ids)))
+keep = [i for i in ids if i not in old]
+order = ["0:%d" % i for i in keep if i < at] + ["1:0"] + ["0:%d" % i for i in keep if i > at]
+print(",".join(order) + "|" + ",".join(str(i) for i in old))' "$LANGCODE")"
+    EXCL="${ORDER#*|}"; ORDER="${ORDER%|*}"
+    SUBOPT=(); [ ! -z "$EXCL" ] && SUBOPT=(--subtitle-tracks "!$EXCL")
 #+end_src
 **** Remux, verify, replace
 #+begin_src bash
@@ -1409,13 +1645,13 @@ print(",".join(order))' "$LANGCODE")"
     echo "Updating $INPUT in place: inserting $OUT (track order $ORDER) ..."
     echo "-------------------------"
     rm -f "$TMPMKV"
-    mkvmerge -o "$TMPMKV" "$INPUT" --language 0:"$LANGCODE" --default-track-flag 0:no --sub-charset 0:UTF-8 "$OUT" --track-order "$ORDER" | grep -v '進行状況\|Progress' || true
+    mkvmerge -o "$TMPMKV" "${SUBOPT[@]}" "$INPUT" --language 0:"$LANGCODE" --default-track-flag 0:no --sub-charset 0:UTF-8 "$OUT" --track-order "$ORDER" | grep -v '進行状況\|Progress' || true
     counts() { ffprobe -v error -count_packets -select_streams "$2" -show_entries stream=nb_read_packets -of csv=p=0 "$1" | tr '\n' ' '; }
     ntracks() { mkvmerge -J "$1" | "$PY" -c 'import json,sys; print(len(json.load(sys.stdin)["tracks"]))'; }
-    NOLD="$(ntracks "$INPUT")"; NNEW="$(ntracks "$TMPMKV")"
-    if [ "$NNEW" -ne $((NOLD + 1)) ]
+    NOLD="$(ntracks "$INPUT")"; NNEW="$(ntracks "$TMPMKV")"; NEXP=$((NOLD + 1 - $(echo "$EXCL" | tr -cd , | wc -c) - ${EXCL:+1}))
+    if [ "$NNEW" -ne "$NEXP" ]
     then
-        echo "Error: the remux has $NNEW tracks, expected $((NOLD + 1)); the original is untouched, the remux is at $TMPMKV"
+        echo "Error: the remux has $NNEW tracks, expected $NEXP; the original is untouched, the remux is at $TMPMKV"
         exit 1
     fi
     if [ "$(counts "$INPUT" v)$(counts "$INPUT" a)" != "$(counts "$TMPMKV" v)$(counts "$TMPMKV" a)" ]
