@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.7.0 - description
+* subtitles - version 1.8.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -48,8 +48,11 @@ builds subtitles from the dub's own word timestamps.
 6. Assembly, driven by the reference: one cue per reference cue.  The
    words are apportioned to the cues at the best legal token boundary
    within ±1 s of each reference edge — sentence punctuation or a pause
-   preferred, never inside a word.  A cue keeps the reference timing,
-   extended only where Whisper hears the speech continue past it.  Two
+   preferred, never inside a word.  A cue's timing follows its speech:
+   it starts at the VAD phrase holding its first word (the reference
+   start when that is earlier) and ends 0.4 s after the phrase holding
+   its last word ends — the reference end is only a floor, since the
+   disc's cues are authored to the original language's lines.  Two
    sentences, or a turn, inside one reference cue go on two lines, as
    on the disc; longer text breaks at punctuation or a particle, never
    inside a katakana or kanji run; ≤ 2 lines (16 characters for
@@ -142,6 +145,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   dir's parent =/tmp/subtitles/models=.
 
 * Changelog
+** 1.8.0
+*** 2026-09-20_13-30-44 UTC (日曜日)
+**** Cue ends follow the speech: the end of the VAD phrase holding the cue's last word (plus 0.4 s linger), no longer the reference end or Whisper's early word end; cue starts likewise from the phrase start, so a following line never trims the previous one. Fixes lines cut off ≈ 0.5 s before the speech finishes.
 ** 1.7.0
 *** 2026-09-19_09-48-29 UTC (土曜日)
 **** Reference-driven assembly: one cue per reference cue with the reference timing (extended only where Whisper hears speech continue), the words apportioned at the best legal token boundary near each reference edge; two sentences or a turn inside one reference cue on two lines; speech without a reference cue still gets its own cues. Fixes cues that merged two speakers and cues cut off before the speech ends. Splits and line breaks only at MeCab word boundaries that begin a bunsetsu (fugashi + unidic-lite), preferring the position after a particle or auxiliary.
@@ -215,7 +221,7 @@ place.  Times in seconds.
 #+begin_src python
 PAD_BEFORE, PAD_AFTER, MERGE_GAP, MAX_REGION = 0.4, 0.6, 1.0, 60.0
 VAD_MIN_OUTSIDE = 0.6            # VAD chunk outside the cues worth adding
-LEAD, LINGER, MIN_DUR, MAX_DUR, GAP, SNAP = 0.10, 0.45, 1.2, 7.0, 0.08, 0.30
+LEAD, LINGER, MIN_DUR, MAX_DUR, GAP, SNAP = 0.10, 0.40, 1.2, 7.0, 0.08, 0.30
 PAUSE_SPLIT = 0.7                # a pause this long ends a subtitle unit
 LOW_CONF = -0.8                  # avg logprob below this is listed for review
 PHRASE_GAP, SPK_MIN, SPK_DIST = 0.12, 0.5, 0.7   # speaker phrases: split at silences this long, minimum audio per embedding, cluster cut (cosine distance)
@@ -457,12 +463,10 @@ def merge_passes(A, B, regions, vad, cfg, prompt, names):
 The unit of voice identity is a stretch of speech between silences of
 ≥ =PHRASE_GAP= — found by a fine VAD pass over the audio, not by
 Whisper's word gaps, which inside a segment are absorbed into the
-neighbouring words.  A Whisper segment's tokens
-are mapped onto the phrases the segment overlaps by rescaling the token
-times onto those phrases' span (segment-level times are reliable, token
-times lean early by up to ≈ 0.5 s), each token then joining the phrase
-it overlaps most; a small first or last group of the segment still
-follows the rest of the segment.
+neighbouring words.  Each token joins the phrase it overlaps most (a
+tolerance of =EDGE_TOL= for Whisper's early lean), in time order and
+never an earlier phrase than the token before it; a token overlapping
+no phrase stays with the previous token's.
 #+begin_src python
 def make_phrases(x, sr, segs, cache, cues=()):
     if os.path.exists(cache): fine = json.load(open(cache))
@@ -474,38 +478,19 @@ def make_phrases(x, sr, segs, cache, cues=()):
         fine = [(d["start"]/sr, d["end"]/sr) for d in ts]; json.dump(fine, open(cache, "w"))
     phr = [dict(start=s_, end=e_, words=[]) for s_, e_ in fine]
     bounds = sorted(set(round(p_["start"], 3) for p_ in phr))
-    starts = [p_["start"] for p_ in phr]
-    ends = [p_["end"] for p_ in phr]
-    for seg in segs:
-        ws = [w for w in seg["words"] if w["w"].strip()]
-        if not ws: continue
-        # phrases this segment overlaps (by its segment-level times, which are far better than its word times)
-        lo = bisect.bisect_left(ends, seg["start"] + 0.05); hi = bisect.bisect_right(starts, seg["end"] - 0.05)
-        over = list(range(lo, hi))
-        if not over:
-            mid = (seg["start"] + seg["end"])/2; over = [max(0, min(len(phr)-1, bisect.bisect_right(starts, mid) - 1))]
-        # rescale the token times from the segment's own span onto the span of those phrases
-        w0, w1 = ws[0]["start"], ws[-1]["end"]; p0, p1 = phr[over[0]]["start"], phr[over[-1]]["end"]
-        scale = (p1 - p0)/(w1 - w0) if w1 > w0 and p1 > p0 else 1.0
-        assign = []
-        for w in ws:
-            a_, b_ = p0 + (w["start"]-w0)*scale, p0 + (w["end"]-w0)*scale
-            def overlap(j): return max(0.0, min(b_, phr[j]["end"]) - max(a_, phr[j]["start"]))
-            def dist(j): return max(phr[j]["start"] - b_, a_ - phr[j]["end"], 0.0)
-            assign.append(max(over, key=lambda j: (overlap(j), -dist(j))))
-        # a small first or last group is Whisper's timing leaning over a boundary, not a turn
-        groups = []
-        for k, j in enumerate(assign):
-            if groups and groups[-1][0] == j: groups[-1][1].append(k)
-            else: groups.append([j, [k]])
-        lim = max(2, int(EDGE_FRAC*len(ws)))
-        if len(groups) > 1 and len(groups[0][1]) < lim:
-            for k in groups[0][1]: assign[k] = groups[1][0]
-        if len(groups) > 1 and len(groups[-1][1]) < lim:
-            for k in groups[-1][1]: assign[k] = groups[-2][0]
-        for w, j in zip(ws, assign): phr[j]["words"].append(w); w["phr"] = j
-    phr = [p_ for p_ in phr if p_["words"]]
-    for p_ in phr: p_["end"] = min(p_["end"], max(w["end"] for w in p_["words"]) + 0.05); p_["start"] = max(p_["start"], min(w["start"] for w in p_["words"]) - 0.05)
+    # monotonic assignment in time order: the phrase a word overlaps most (±EDGE_TOL for Whisper's lean),
+    # never an earlier phrase than the previous word's, the previous word's phrase when it overlaps none
+    words = sorted((w for seg in segs for w in seg["words"] if w["w"].strip()), key=lambda w: w["start"])
+    starts = [p_["start"] for p_ in phr]; cur = 0
+    for w in words:
+        lo = max(cur, bisect.bisect_right(starts, w["start"] - EDGE_TOL) - 1); hi = bisect.bisect_right(starts, w["end"] + EDGE_TOL)
+        best, bo = None, 0.0
+        for j in range(max(lo, 0), min(hi, len(phr))):
+            o = min(w["end"] + EDGE_TOL, phr[j]["end"]) - max(w["start"] - EDGE_TOL, phr[j]["start"])
+            if o > bo: best, bo = j, o
+        if best is None: best = min(cur, len(phr) - 1)
+        cur = best; w["phr"] = best; phr[best]["words"].append(w)
+    phr = [p_ for p_ in phr if p_["words"]]        # the VAD edges are kept as they are: they are the real speech edges
     return phr, bounds
 #+end_src
 **** Clustering: long phrases define the voices
@@ -923,10 +908,43 @@ def split_cue(ws, cfg):
     mid = (ws[0]["start"] + ws[-1]["end"])/2
     return min(range(1, len(ws)), key=lambda j: boundary_score(ws, j, mid, cfg))
 #+end_src
+**** Speech edges of a group of words
+The VAD phrases give the real edges of the speech: a cue's speech
+starts where the phrase holding its first word starts and ends where
+the phrase holding its last word ends — unless that phrase is shared
+with the neighbouring cue (no silence between the lines), in which
+case the edge is the midpoint between the two cues' adjacent words,
+corrected by Whisper's lean — its word times run early by a fairly
+constant amount, measured on the film itself against the VAD edges
+(≈ 0.2 s).
+#+begin_src python
+def whisper_lean(phrases):
+    """how early Whisper's word times run against the VAD edges on this film (median over phrases >= 0.6 s)"""
+    ends = [p_["end"] - p_["words"][-1]["end"] for p_ in phrases.values() if p_["end"] - p_["start"] >= 0.6]
+    starts = [p_["start"] - p_["words"][0]["start"] for p_ in phrases.values() if p_["end"] - p_["start"] >= 0.6]
+    if len(ends) < 20: return 0.2
+    return float(max(0.0, min(0.5, (np.median(ends) + np.median(starts))/2)))
+
+def speech_edges(g, phrases, prev_last=None, next_first=None, lean=0.2):
+    """speech start and end of a group of words: the VAD phrase edges, or — when the neighbouring cue shares the
+    phrase (no pause between the lines) — the midpoint of Whisper's times corrected by its measured lean"""
+    a, b = g[0], g[-1]
+    st, en = a["start"], b["end"] + lean
+    if phrases and a.get("phr") is not None:
+        pa = phrases[a["phr"]]
+        st = (prev_last["end"] + a["start"])/2 + lean if prev_last is not None and prev_last.get("phr") == a["phr"] else pa["start"]
+    if phrases and b.get("phr") is not None:
+        pb = phrases[b["phr"]]
+        en = (b["end"] + next_first["start"])/2 + lean if next_first is not None and next_first.get("phr") == b["phr"] else max(pb["end"], b["end"])
+    return st, en
+#+end_src
 **** Timing and output
-The reference timing is kept; the start moves earlier and the end
-later only when Whisper places words outside it; neighbouring cues
-never overlap.
+A cue starts at its speech start (or the reference start, when that
+is earlier) and ends =LINGER= after its speech ends (the reference end
+as a floor).  When neighbours collide, the earlier cue keeps at least
+its speech and the later one starts after it — the reference start of
+a following line never trims a line that is still being spoken; only
+when the speech itself overlaps is the boundary the midpoint.
 #+begin_src python
 def conf(ws):
     """mean word probability of a cue (0..1)"""
@@ -935,33 +953,51 @@ def conf(ws):
 def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None):
     for si, seg in enumerate(segs):
         for w in seg["words"]: w["seg"] = si
-    if x is not None: make_phrases(x, sr, segs, os.path.join(work, "vad_fine.json"))   # sets w["phr"]
+    phrases = None
+    if x is not None:
+        phr, _ = make_phrases(x, sr, segs, os.path.join(work, "vad_fine.json"))   # sets w["phr"] = index into the full phrase list
+        phrases = {}
+        for p_ in phr:
+            for w in p_["words"]: phrases[w["phr"]] = p_
     mark_word_boundaries(segs, cfg)
     words = sorted((w for seg in segs for w in seg["words"] if w["w"].strip()), key=lambda w: w["start"])
     groups, outside = apportion(words, cues, cfg)
+    lean = whisper_lean(phrases) if phrases else 0.2
+    print("  timing: Whisper's word times lean %.2f s early against the speech; corrected" % lean, flush=True)
     out = []
-    for (s_, e_, _), g in zip(cues, groups):
-        if not g: continue
-        st = min(s_, g[0]["start"] - LEAD); en = max(e_, g[-1]["end"] + LINGER)
+    nonempty = [i for i, g in enumerate(groups) if g]
+    for n_, i in enumerate(nonempty):
+        (s_, e_, _), g = cues[i], groups[i]
+        prev_last = groups[nonempty[n_-1]][-1] if n_ else None
+        next_first = groups[nonempty[n_+1]][0] if n_+1 < len(nonempty) else None
+        sp_st, sp_en = speech_edges(g, phrases, prev_last, next_first, lean)
+        st = min(s_, sp_st - LEAD); en = max(e_, sp_en + LINGER)
         lines = cue_text(g, cfg)
         if lines is None:
             j = split_cue(g, cfg); ga, gb = g[:j], g[j:]
             tb = (ga[-1]["end"] + gb[0]["start"])/2
-            out.append(dict(start=st, end=max(tb - GAP, st + MIN_DUR), text="\n".join(cue_text(ga, cfg) or [clean_text(ga, cfg)]), logprob=conf(ga), multi=False))
-            out.append(dict(start=tb, end=en, text="\n".join(cue_text(gb, cfg) or [clean_text(gb, cfg)]), logprob=conf(gb), multi=False))
+            out.append(dict(start=st, end=max(tb - GAP, st + MIN_DUR), text="\n".join(cue_text(ga, cfg) or [clean_text(ga, cfg)]), logprob=conf(ga), multi=False, sp_st=sp_st, sp_en=tb))
+            out.append(dict(start=tb, end=en, text="\n".join(cue_text(gb, cfg) or [clean_text(gb, cfg)]), logprob=conf(gb), multi=False, sp_st=tb, sp_en=sp_en))
         else:
-            out.append(dict(start=st, end=en, text="\n".join(lines), logprob=conf(g), multi=len(lines) == 2 and len(turn_points(g, cfg)) > 0))
+            out.append(dict(start=st, end=en, text="\n".join(lines), logprob=conf(g), multi=len(lines) == 2 and len(turn_points(g, cfg)) > 0, sp_st=sp_st, sp_en=sp_en))
     # speech the reference has no cue for
     if outside:
         free = build_cues(make_units([dict(words=outside, avg_logprob=0.0, text="")], [], cfg), [], cfg)
-        out += [dict(start=a, end=b, text=t, logprob=lp, multi=m) for a, b, t, lp, m in free]
+        out += [dict(start=a, end=b, text=t, logprob=lp, multi=m, sp_st=a + LEAD, sp_en=b - LINGER) for a, b, t, lp, m in free]
+    out = [c for c in out if re.search(r"\w", c["text"])]       # a cue of bare punctuation or a dash is nothing
     out.sort(key=lambda c: c["start"])
     for c in out:
         if c["end"] - c["start"] < MIN_DUR: c["end"] = c["start"] + MIN_DUR
+    # colliding neighbours: the earlier cue keeps its speech, the later one starts after it — unless the speech itself overlaps
     for a, b in zip(out, out[1:]):
         if a["end"] > b["start"] - GAP:
-            a["end"] = max(a["start"] + 0.5, b["start"] - GAP)
-            if a["end"] > b["start"] - GAP: b["start"] = min(a["end"] + GAP, b["end"] - 0.5)
+            if a["sp_en"] + GAP <= b["sp_st"]:
+                cut = max(a["sp_en"] + 0.05, min(a["end"], b["sp_st"] - LEAD))
+                cut = min(cut, b["sp_st"])
+            else:
+                cut = (a["sp_en"] + b["sp_st"])/2
+            a["end"] = max(a["start"] + 0.5, cut); b["start"] = max(b["start"], a["end"] + GAP)
+            if b["end"] - b["start"] < 0.5: b["end"] = b["start"] + 0.5
     return [(c["start"], c["end"], c["text"], c["logprob"], c["multi"]) for c in out]
 #+end_src
 *** Review report
