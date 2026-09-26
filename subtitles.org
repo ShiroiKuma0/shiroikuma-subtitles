@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.8.0 - description
+* subtitles - version 1.8.3 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -145,6 +145,15 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   dir's parent =/tmp/subtitles/models=.
 
 * Changelog
+** 1.8.3
+*** 2026-09-26_13-56-36 UTC (土曜日)
+**** A Whisper segment spoken faster than anyone can speak (above the language's =max_rate= characters per second, 30 for Japanese — real lines stay below 20) is dropped as invented: catches the stock ありがとうございました squeezed into 0.18 s after a real line, where the VAD phrase of that line hid it from the silence test.
+** 1.8.2
+*** 2026-09-26_13-00-34 UTC (土曜日)
+**** Fix dialogue lost at Whisper's 30-s window edge: regions are at most 28 s (were 60), so each is decoded in one window — past the edge Whisper could lose the thread, skip up to 13 s of speech and stretch one token over it (the cues then showed single syllables for seconds). A token longer than 2 s with ≥ 1 s of VAD speech under it now marks skipped speech: its segment is transcribed again on its own and replaced when that recovers the speech; the review lists every repair. The Whisper cache is keyed by each region's bounds, so a change of regions re-transcribes only the new ones (a cache of the old format is converted using the previous regions.json).
+** 1.8.1
+*** 2026-09-26_12-28-54 UTC (土曜日)
+**** Fix cues stretched across long silences: a Whisper segment the VAD hears no speech under, with a high no-speech probability and a low log-probability, is dropped as invented over silence (the stock ありがとうございました, それではまた, おつかれさまです …); a token outside every VAD phrase joins only the nearest phrased token of its own Whisper segment, never the previous line's phrase across a silence (which made two lines 90 s apart look like one stretch of speech and put the cue boundary halfway); a cue starts at the VAD phrase holding its first word, the reference start only when there is none.
 ** 1.8.0
 *** 2026-09-20_13-30-44 UTC (日曜日)
 **** Cue ends follow the speech: the end of the VAD phrase holding the cue's last word (plus 0.4 s linger), no longer the reference end or Whisper's early word end; cue starts likewise from the phrase start, so a following line never trims the previous one. Fixes lines cut off ≈ 0.5 s before the speech finishes.
@@ -219,7 +228,7 @@ import numpy as np
 Region building, subtitle timing and the review threshold, in one
 place.  Times in seconds.
 #+begin_src python
-PAD_BEFORE, PAD_AFTER, MERGE_GAP, MAX_REGION = 0.4, 0.6, 1.0, 60.0
+PAD_BEFORE, PAD_AFTER, MERGE_GAP, MAX_REGION = 0.4, 0.6, 1.0, 28.0   # MAX_REGION below Whisper's 30-s window: one window per region
 VAD_MIN_OUTSIDE = 0.6            # VAD chunk outside the cues worth adding
 LEAD, LINGER, MIN_DUR, MAX_DUR, GAP, SNAP = 0.10, 0.40, 1.2, 7.0, 0.08, 0.30
 PAUSE_SPLIT = 0.7                # a pause this long ends a subtitle unit
@@ -233,17 +242,18 @@ SPK_CONTRAST = 0.35              # and the two runs' own voice embeddings must b
 MODELS_DIR = "/tmp/subtitles/models"
 #+end_src
 **** Per-language table
-Maximum line length, whether words join with spaces, which punctuation
+Maximum line length, the fastest believable speech (characters per
+second, spaces and punctuation not counted), whether words join with spaces, which punctuation
 ends a sentence, what to strip from line ends, the hallucination
 phrases Whisper is known to produce for the language, and how a name
 list is turned into a prompt.  Unknown languages get the "_" entry.
 #+begin_src python
 LANG = {
-    "ja": dict(maxline=16, spaces=False, punct_end="。！？!?", strip_end="。", sep="、", stop="。", dash="",
+    "ja": dict(maxline=16, max_rate=30, spaces=False, punct_end="。！？!?", strip_end="。", sep="、", stop="。", dash="",
                hallu=["ご視聴ありがとう", "チャンネル登録", "字幕", "おやすみなさい",
                       "ご覧いただ", "次回", "最後まで", "吹き替え", "登場人物", "映画の映像"],
                name_re=r"[ァ-ヴー]{2,}"),
-    "_":  dict(maxline=42, spaces=True, punct_end=".!?", strip_end="", sep=", ", stop=".", dash="- ",
+    "_":  dict(maxline=42, max_rate=45, spaces=True, punct_end=".!?", strip_end="", sep=", ", stop=".", dash="- ",
                hallu=["Thanks for watching", "Thank you for watching", "Subtitles by",
                       "Amara.org", "Subscribe", "Like and subscribe"],
                name_re=r"(?<![.!?]\s)(?<!^)\b[A-Z][a-z]{2,}\b"),
@@ -320,7 +330,10 @@ def build_regions(cues, vad, total):
 #+end_src
 **** Splitting long regions
 Whisper works in 30-s windows; a region longer than =MAX_REGION= is cut
-at its largest internal gap between cues (or VAD chunks).
+at its largest internal gap between cues (or VAD chunks).  =MAX_REGION=
+stays below the window: when a region spans two windows, Whisper can
+lose the thread at the seek to the second, skip whole lines and stretch
+a single token over them.
 #+begin_src python
 def split_long(r, cues, vad):
     s, e = r
@@ -371,44 +384,129 @@ def unload_model(model):
 #+end_src
 **** One pass over regions
 One Whisper call per region; the region's start is added back to every
-segment and word time.  The result is cached per pass so that the
-subtitle-building parameters can be re-tuned without re-transcribing.
+segment and word time.  The result is cached per pass, keyed by each
+region's bounds, so that the subtitle-building parameters can be
+re-tuned without re-transcribing, and a change of regions transcribes
+only the regions not seen before.  A cache of the old format (a list
+indexed by region number) is converted with the previous
+=regions.json=, entry by entry where its segments fit their region.
 #+begin_src python
-def transcribe(x, sr, regions, lang, model_name, prompt, cache=None, force=False, model=None, label="regions"):
-    if cache and os.path.exists(cache) and not force:
-        print("  %s: cached (%s)" % (label, os.path.basename(cache))); return json.load(open(cache))
+def region_key(s, e): return "%.3f-%.3f" % (s, e)
+
+def load_pass_cache(cache, old_regions=None):
+    """-> {region key: segments}"""
+    if not (cache and os.path.exists(cache)): return {}
+    d = json.load(open(cache))
+    if isinstance(d, dict): return d.get("regions", {})
+    by = {}
+    if old_regions:
+        for seg in d:
+            by.setdefault(seg["region"], []).append(seg)
+        by = {region_key(*old_regions[k]): v for k, v in by.items()
+              if k < len(old_regions) and all(old_regions[k][0] - 1 <= g["start"] and g["end"] <= old_regions[k][1] + 1 for g in v)}
+    return by
+
+def save_pass_cache(cache, data):
+    tmp = cache + ".tmp"; json.dump(dict(version=2, regions=data), open(tmp, "w"), ensure_ascii=False); os.replace(tmp, cache)
+
+def transcribe(x, sr, regions, lang, model_name, prompt, cache=None, force=False, model=None, label="regions", old_regions=None):
+    data = {} if force else load_pass_cache(cache, old_regions)
+    missing = [k for k, (s, e) in enumerate(regions) if region_key(s, e) not in data]
+    if not missing: print("  %s: cached (%s)" % (label, os.path.basename(cache) if cache else "-"))
+    elif cache and len(missing) < len(regions): print("  %s: %d of %d cached, transcribing %d" % (label, len(regions) - len(missing), len(regions), len(missing)), flush=True)
     own = model is None
-    if own: model = load_model(model_name)
-    out = []; prog = Progress(label, len(regions))
+    if missing:
+        prog = Progress(label, len(missing))
+        for i, k in enumerate(missing):
+            if model is None: model = load_model(model_name)
+            s, e = regions[k]
+            r = model.transcribe(x[int(s*sr):int(e*sr)], language=lang, task="transcribe",
+                                 word_timestamps=True, initial_prompt=prompt,
+                                 condition_on_previous_text=False, fp16=True, beam_size=5, best_of=5)
+            data[region_key(s, e)] = [dict(region=k, start=s+seg["start"], end=s+seg["end"], text=seg["text"],
+                                           avg_logprob=seg["avg_logprob"], no_speech_prob=seg["no_speech_prob"],
+                                           compression_ratio=seg["compression_ratio"],
+                                           words=[dict(w=w["word"], start=s+w["start"], end=s+w["end"], p=w.get("probability", 0))
+                                                  for w in seg.get("words", [])]) for seg in r["segments"]]
+            prog.step(i+1, "at %s, %d segments" % (hms(s), len(data[region_key(s, e)])))
+            if cache and i % 10 == 0: save_pass_cache(cache, data)
+        prog.done()
+        if cache: save_pass_cache(cache, data)
+    if own and model is not None: unload_model(model)
+    out = []
     for k, (s, e) in enumerate(regions):
-        r = model.transcribe(x[int(s*sr):int(e*sr)], language=lang, task="transcribe",
-                             word_timestamps=True, initial_prompt=prompt,
-                             condition_on_previous_text=False, fp16=True, beam_size=5, best_of=5)
-        for seg in r["segments"]:
-            out.append(dict(region=k, start=s+seg["start"], end=s+seg["end"], text=seg["text"],
-                            avg_logprob=seg["avg_logprob"], no_speech_prob=seg["no_speech_prob"],
-                            compression_ratio=seg["compression_ratio"],
-                            words=[dict(w=w["word"], start=s+w["start"], end=s+w["end"], p=w.get("probability", 0))
-                                   for w in seg.get("words", [])]))
-        prog.step(k+1, "at %s, %d segments" % (hms(s), len(out)))
-        if cache and (k % 25 == 0): json.dump(out, open(cache, "w"), ensure_ascii=False)
-    prog.done()
-    if cache: json.dump(out, open(cache, "w"), ensure_ascii=False)
-    if own: unload_model(model)
+        for seg in data[region_key(s, e)]: out.append(dict(seg, region=k, words=[dict(w) for w in seg["words"]]))
     return out
+#+end_src
+**** Repairing skipped speech
+Should Whisper still skip speech inside a region, it shows as one
+token stretched over the lost lines: a token longer than =SKIP_TOKEN=
+with at least =SKIP_SPEECH= of VAD speech under it.  The segment
+holding it is transcribed again as a region of its own (padded, cut
+below =MAX_REGION= if need be, cached like any region); the new
+segments inside the old one's span replace it when they leave less
+speech under stretched tokens.
+#+begin_src python
+SKIP_TOKEN, SKIP_SPEECH = 2.0, 1.0
+
+def vad_under(s, e, vad): return sum(max(0.0, min(e, b) - max(s, a)) for a, b in vad)
+
+def skipped(segs, vad):
+    """seconds of VAD speech under stretched tokens"""
+    return sum(vad_under(w["start"], w["end"], vad) for g in segs for w in g["words"]
+               if w["end"] - w["start"] > SKIP_TOKEN and vad_under(w["start"], w["end"], vad) >= SKIP_SPEECH)
+
+def repair_skips(x, sr, segs, cues, vad, lang, model_name, prompt, cache, label):
+    """-> segments with the repaired ones replaced, and the repairs [(start, end, old text, new text, accepted)]"""
+    bad = [i for i, g in enumerate(segs) if skipped([g], vad) > 0]
+    if not bad: return segs, []
+    wins = {i: split_long([max(0.0, segs[i]["start"] - PAD_BEFORE), min(len(x)/sr, segs[i]["end"] + PAD_AFTER)], cues, vad) for i in bad}
+    flat = [w for i in bad for w in wins[i]]
+    new = transcribe(x, sr, flat, lang, model_name, prompt, cache, label=label)
+    repairs = []; out = list(segs); pos = 0
+    for i in bad:
+        g = segs[i]; n = len(wins[i]); ks = set(range(pos, pos + n)); pos += n
+        cand = [dict(h, region=g["region"]) for h in new if h["region"] in ks and g["start"] - 0.2 <= (h["start"] + h["end"])/2 <= g["end"] + 0.2]
+        ok = bool(cand) and skipped(cand, vad) < skipped([g], vad)
+        repairs.append((g["start"], g["end"], g["text"].strip(), "".join(h["text"].strip() for h in cand), ok))
+        if ok: out[i] = cand
+    flat_out = []
+    for g in out: flat_out += g if isinstance(g, list) else [g]
+    flat_out.sort(key=lambda g: g["start"])
+    return flat_out, repairs
 #+end_src
 *** Hallucination filter
 A segment is dropped when Whisper itself flags it (no speech, or a
-repetition loop), when it is a known outro phrase, or when it echoes
-the name prompt (as a whole or by 4-gram overlap).
+repetition loop), when it is a known outro phrase, when it echoes the
+name prompt (as a whole or by 4-gram overlap), or when the VAD hears
+no speech under it and Whisper is unsure there is any (no-speech
+probability ≥ =SILENT_NSP=, log-probability ≤ =SILENT_LP=) — the stock
+phrases it invents over music or silence — or when it is spoken faster
+than the language's =max_rate= allows (from =RATE_MIN_CHARS= characters
+on): the same stock phrases squeezed into a fraction of a second after
+a real line, where that line's VAD phrase hides them from the silence
+test.  Real lines the VAD misses
+(shouting over music) score well inside those limits.  The loudness
+of the audio does not tell the two apart: music is as loud as speech.
 #+begin_src python
 def strip_punct(t): return re.sub(r"[、。！？!?，,.\s『』「」\"']", "", t)
 
-def bad_reason(seg, cfg, prompt):
+SILENT_NSP, SILENT_LP = 0.65, -0.6
+RATE_MIN_CHARS = 6
+
+def vad_silent(seg, vad):
+    """the VAD hears (almost) no speech under the segment, ±0.3 s"""
+    s_, e_ = seg["start"] - 0.3, seg["end"] + 0.3
+    return sum(max(0.0, min(e_, b) - max(s_, a)) for a, b in vad) <= 0.1*(seg["end"] - seg["start"])
+
+def bad_reason(seg, cfg, prompt, vad=None):
     t = seg["text"].strip()
     if seg["no_speech_prob"] > 0.6 and seg["avg_logprob"] < -1.0: return "no-speech"
+    if vad is not None and seg["no_speech_prob"] >= SILENT_NSP and seg["avg_logprob"] <= SILENT_LP and vad_silent(seg, vad): return "silent"
     if seg["compression_ratio"] > 2.4: return "repetition"
     if not t or not re.search(r"\w", t): return "empty"
+    n = len(strip_punct(t))
+    if n >= RATE_MIN_CHARS and n/max(seg["end"] - seg["start"], 0.01) > cfg["max_rate"]: return "too fast"
     if any(h.lower() in t.lower() for h in cfg["hallu"]): return "hallucination"
     if prompt:
         ts_, ps = strip_punct(t), strip_punct(prompt)
@@ -441,10 +539,10 @@ def merge_passes(A, B, regions, vad, cfg, prompt, names):
     out = []; used = dict(prompt=0, noprompt=0); dropped = []
     for k, (rs, re_) in enumerate(regions):
         a = [s for s in (A or []) if s["region"] == k]; b = [s for s in B if s["region"] == k]
-        a_ok = [s for s in a if not bad_reason(s, cfg, prompt)]
-        b_ok = [s for s in b if not bad_reason(s, cfg, None)]
-        dropped += [(s, bad_reason(s, cfg, prompt)) for s in a if bad_reason(s, cfg, prompt)]
-        dropped += [(s, bad_reason(s, cfg, None)) for s in b if bad_reason(s, cfg, None)]
+        a_ok = [s for s in a if not bad_reason(s, cfg, prompt, vad)]
+        b_ok = [s for s in b if not bad_reason(s, cfg, None, vad)]
+        dropped += [(s, bad_reason(s, cfg, prompt, vad)) for s in a if bad_reason(s, cfg, prompt, vad)]
+        dropped += [(s, bad_reason(s, cfg, None, vad)) for s in b if bad_reason(s, cfg, None, vad)]
         if A is not None and len(a_ok) == len(a) and coverage(a_ok, rs, re_, vad) >= coverage(b_ok, rs, re_, vad) - 0.05:
             out += a_ok; used["prompt"] += 1
         else:
@@ -465,8 +563,12 @@ The unit of voice identity is a stretch of speech between silences of
 Whisper's word gaps, which inside a segment are absorbed into the
 neighbouring words.  Each token joins the phrase it overlaps most (a
 tolerance of =EDGE_TOL= for Whisper's early lean), in time order and
-never an earlier phrase than the token before it; a token overlapping
-no phrase stays with the previous token's.
+never an earlier phrase than the token before it.  A token overlapping
+no phrase joins the nearest phrased token of its own Whisper segment
+(Whisper often stretches a segment's first token back into the silence
+before it); with none in its segment it stays without a phrase —
+never the previous line's phrase across a silence, which would make
+two lines far apart look like one stretch of speech.
 #+begin_src python
 def make_phrases(x, sr, segs, cache, cues=()):
     if os.path.exists(cache): fine = json.load(open(cache))
@@ -479,7 +581,9 @@ def make_phrases(x, sr, segs, cache, cues=()):
     phr = [dict(start=s_, end=e_, words=[]) for s_, e_ in fine]
     bounds = sorted(set(round(p_["start"], 3) for p_ in phr))
     # monotonic assignment in time order: the phrase a word overlaps most (±EDGE_TOL for Whisper's lean),
-    # never an earlier phrase than the previous word's, the previous word's phrase when it overlaps none
+    # never an earlier phrase than the previous word's
+    for si, seg in enumerate(segs):
+        for w in seg["words"]: w["seg"] = si
     words = sorted((w for seg in segs for w in seg["words"] if w["w"].strip()), key=lambda w: w["start"])
     starts = [p_["start"] for p_ in phr]; cur = 0
     for w in words:
@@ -488,8 +592,17 @@ def make_phrases(x, sr, segs, cache, cues=()):
         for j in range(max(lo, 0), min(hi, len(phr))):
             o = min(w["end"] + EDGE_TOL, phr[j]["end"]) - max(w["start"] - EDGE_TOL, phr[j]["start"])
             if o > bo: best, bo = j, o
-        if best is None: best = min(cur, len(phr) - 1)
-        cur = best; w["phr"] = best; phr[best]["words"].append(w)
+        w["phr"] = best
+        if best is not None: cur = best
+    # a word overlapping no phrase: the phrase of the nearest phrased word of its own Whisper segment, else none
+    for i, w in enumerate(words):
+        if w["phr"] is not None: continue
+        prv = next((v for v in reversed(words[:i]) if v["phr"] is not None), None)
+        nxt = next((v for v in words[i+1:] if v["phr"] is not None), None)
+        cand = [v for v in (prv, nxt) if v is not None and v["seg"] == w["seg"]]
+        if cand: w["phr"] = min(cand, key=lambda v: abs(v["start"] - w["start"]))["phr"]
+    for w in words:
+        if w["phr"] is not None: phr[w["phr"]]["words"].append(w)
     phr = [p_ for p_ in phr if p_["words"]]        # the VAD edges are kept as they are: they are the real speech edges
     return phr, bounds
 #+end_src
@@ -939,8 +1052,9 @@ def speech_edges(g, phrases, prev_last=None, next_first=None, lean=0.2):
     return st, en
 #+end_src
 **** Timing and output
-A cue starts at its speech start (or the reference start, when that
-is earlier) and ends =LINGER= after its speech ends (the reference end
+A cue starts at its speech start — the reference start only when no
+VAD phrase holds its first word, since the reference often runs ahead
+of the dub — and ends =LINGER= after its speech ends (the reference end
 as a floor).  When neighbours collide, the earlier cue keeps at least
 its speech and the later one starts after it — the reference start of
 a following line never trims a line that is still being spoken; only
@@ -971,7 +1085,8 @@ def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None):
         prev_last = groups[nonempty[n_-1]][-1] if n_ else None
         next_first = groups[nonempty[n_+1]][0] if n_+1 < len(nonempty) else None
         sp_st, sp_en = speech_edges(g, phrases, prev_last, next_first, lean)
-        st = min(s_, sp_st - LEAD); en = max(e_, sp_en + LINGER)
+        st = sp_st - LEAD if phrases and g[0].get("phr") is not None else min(s_, sp_st - LEAD)
+        en = max(e_, sp_en + LINGER)
         lines = cue_text(g, cfg)
         if lines is None:
             j = split_cue(g, cfg); ga, gb = g[:j], g[j:]
@@ -1020,6 +1135,9 @@ def write_report(path, cues, vad, used, dropped, ref_count):
         for s, e, t, lp, _ in low: f.write("%s --> %s  (%.2f)  %s\n" % (fmt_time(s), fmt_time(e), lp, t.replace("\n", " / ")))
         f.write("\nTwo-line cues at a turn or sentence end inside one reference cue: %d\n\n" % len(multi))
         for s, e, t, lp, _ in multi: f.write("%s --> %s  %s\n" % (fmt_time(s), fmt_time(e), t.replace("\n", " / ")))
+        reps = used.get("repairs", [])
+        f.write("\nSegments where Whisper skipped speech, re-transcribed: %d (repaired %d)\n\n" % (len(reps), sum(1 for r in reps if r[4])))
+        for s, e, old, new, ok in reps: f.write("%s --> %s  [%s]  %s  =>  %s\n" % (fmt_time(s), fmt_time(e), "repaired" if ok else "kept", old, new))
         f.write("\nDropped Whisper segments: %d\n\n" % len(dropped))
         for seg, why in dropped: f.write("%s --> %s  [%s]  %s\n" % (fmt_time(seg["start"]), fmt_time(seg["end"]), why, seg["text"].strip()))
     return len(miss), len(low)
@@ -1351,14 +1469,23 @@ def prepare(a):
 #+begin_src python
 def cmd_run(a):
     sr, x, total, cues, vad, regions = prepare(a)
-    json.dump(regions, open(os.path.join(a.work, "regions.json"), "w"))
+    rpath = os.path.join(a.work, "regions.json")
+    old_regions = json.load(open(rpath)) if os.path.exists(rpath) else None     # to convert a cache of the old format
+    json.dump(regions, open(rpath, "w"))
     cfg = lang_cfg(a.lang); names = parse_names(a.names); prompt = make_prompt(names, cfg)
     print("audio %.1f min; reference cues %d; VAD speech %.1f min; %d regions, %.1f min"
           % (total/60, len(cues), sum(e-s for s, e in vad)/60, len(regions), sum(e-s for s, e in regions)/60), flush=True)
     npass = 2 if prompt else 1
-    A = transcribe(x, sr, regions, a.lang, a.model, prompt, os.path.join(a.work, "segments_prompt.json"), a.force, label="pass 1/2 (prompted)  region") if prompt else None
-    B = transcribe(x, sr, regions, a.lang, a.model, None, os.path.join(a.work, "segments_noprompt.json"), a.force, label="pass %d/%d (unprompted) region" % (npass, npass))
+    pa, pb = os.path.join(a.work, "segments_prompt.json"), os.path.join(a.work, "segments_noprompt.json")
+    A = transcribe(x, sr, regions, a.lang, a.model, prompt, pa, a.force, label="pass 1/2 (prompted)  region", old_regions=old_regions) if prompt else None
+    B = transcribe(x, sr, regions, a.lang, a.model, None, pb, a.force, label="pass %d/%d (unprompted) region" % (npass, npass), old_regions=old_regions)
+    repairs = []
+    if A is not None:
+        A, r = repair_skips(x, sr, A, cues, vad, a.lang, a.model, prompt, pa, "repair (prompted)   segment"); repairs += r
+    B, r = repair_skips(x, sr, B, cues, vad, a.lang, a.model, None, pb, "repair (unprompted) segment"); repairs += r
+    if repairs: print("  skipped speech: %d segment(s) re-transcribed, %d repaired" % (len(repairs), sum(1 for r in repairs if r[4])), flush=True)
     merged, used, dropped = merge_passes(A, B, regions, vad, cfg, prompt, names)
+    used["repairs"] = repairs
     json.dump(merged, open(os.path.join(a.work, "segments_merged.json"), "w"), ensure_ascii=False)
     if a.speakers:
         nspk = label_speakers(x, sr, merged, os.path.join(a.work, "speakers.json"), cues)
