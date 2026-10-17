@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.8.3 - description
+* subtitles - version 1.8.5 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -25,7 +25,8 @@ as a map of where speech is, transcribes the dub with Whisper, and
 builds subtitles from the dub's own word timestamps.
 
 ** Pipeline
-1. Decode the audio to 16 kHz mono WAV (=ffmpeg=, any container).
+1. Decode the audio to 16 kHz mono WAV (=ffmpeg=, any container), from
+   the container's time 0 — a track that starts late is padded.
 2. Speech regions: the reference SRT's cues, padded 0.4 s before and
    0.6 s after and merged across gaps of ≤ 1 s, united with anything
    a VAD (Silero) hears outside them.  Without a reference SRT the VAD
@@ -145,6 +146,14 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   dir's parent =/tmp/subtitles/models=.
 
 * Changelog
+** 1.8.5
+*** 2026-10-17_12-40-00 UTC (土曜日)
+**** Invented stock lines dropped where the VAD hears something: a segment that is nothing but one of the language's stock phrases (ありがとうございました, それではまた, お疲れ様でした …) goes when Whisper's no-speech probability is ≥ 0.7 or it stretches a syllable over more than 2 s. Over engine noise, panting and songs the VAD often hears "speech", so the silence test kept them (Terminator: 14 such lines; the two real ありがとう, at no-speech 0.4–0.5, stay).
+**** Fix -M on an MKV that holds no earlier SRT of the tool's: the expected track count was a shell syntax error, which abandoned the whole update — the remux was left as =.remux-tmp= beside the movie, the original kept, and the summary still said "updated in place". The summary now says so only after the replacement.
+**** Fix: a reference cue with no speech of its own no longer takes the first word of the next cue's line (どう|したんだ): when the next word lies past the cue's edge, the cue gets nothing.
+** 1.8.4
+*** 2026-10-17_12-04-58 UTC (土曜日)
+**** Fix every line running early on a dub track that starts late in the container (one added with =mkvmerge --sync=, e.g. a DVD dub moved onto a UHD picture): the decode began at the track's first packet and dropped the lead-in, so the transcription — and the reference-driven assembly against the correctly timed reference — ran early by that much (Terminator: 8.15 s, cues garbled). The audio is now decoded from the container's time 0 with the lead-in filled by silence (=-copyts=, =aresample=async=1:first_pts=0=), and the WAV's length is checked against the stream's last packet. A WAV decoded the old way, or from another =-a= stream, is decoded again and its VAD, regions and Whisper caches are dropped.
 ** 1.8.3
 *** 2026-09-26_13-56-36 UTC (土曜日)
 **** A Whisper segment spoken faster than anyone can speak (above the language's =max_rate= characters per second, 30 for Japanese — real lines stay below 20) is dropped as invented: catches the stock ありがとうございました squeezed into 0.18 s after a real line, where the VAD phrase of that line hid it from the silence test.
@@ -245,17 +254,23 @@ MODELS_DIR = "/tmp/subtitles/models"
 Maximum line length, the fastest believable speech (characters per
 second, spaces and punctuation not counted), whether words join with spaces, which punctuation
 ends a sentence, what to strip from line ends, the hallucination
-phrases Whisper is known to produce for the language, and how a name
+phrases Whisper is known to produce for the language (dropped
+wherever they appear), its stock phrases (dropped only as a whole
+segment Whisper doubts, since people do say them — written without
+punctuation, lower case), and how a name
 list is turned into a prompt.  Unknown languages get the "_" entry.
 #+begin_src python
 LANG = {
     "ja": dict(maxline=16, max_rate=30, spaces=False, punct_end="。！？!?", strip_end="。", sep="、", stop="。", dash="",
                hallu=["ご視聴ありがとう", "チャンネル登録", "字幕", "おやすみなさい",
                       "ご覧いただ", "次回", "最後まで", "吹き替え", "登場人物", "映画の映像"],
+               stock={"ありがとうございました", "ありがとうございます", "それではまた", "それでは", "またね",
+                      "お疲れ様でした", "おつかれさまでした", "お疲れさまでした", "さようなら", "バイバイ"},
                name_re=r"[ァ-ヴー]{2,}"),
     "_":  dict(maxline=42, max_rate=45, spaces=True, punct_end=".!?", strip_end="", sep=", ", stop=".", dash="- ",
                hallu=["Thanks for watching", "Thank you for watching", "Subtitles by",
                       "Amara.org", "Subscribe", "Like and subscribe"],
+               stock={"thank you", "thanks", "bye", "goodbye", "see you next time", "see you"},
                name_re=r"(?<![.!?]\s)(?<!^)\b[A-Z][a-z]{2,}\b"),
 }
 def lang_cfg(lang): return LANG.get(lang, LANG["_"])
@@ -485,7 +500,15 @@ phrases it invents over music or silence — or when it is spoken faster
 than the language's =max_rate= allows (from =RATE_MIN_CHARS= characters
 on): the same stock phrases squeezed into a fraction of a second after
 a real line, where that line's VAD phrase hides them from the silence
-test.  Real lines the VAD misses
+test — or when the whole segment is one of the language's =stock=
+phrases (ありがとうございました, それではまた, お疲れ様でした …) and
+Whisper doubts there is speech (no-speech probability ≥ =STOCK_NSP=)
+or stretches a syllable over more than =STOCK_STRETCH= seconds: these
+are what Whisper writes over engine noise, panting or a song, and the
+VAD may well hear "speech" there.  A real ありがとう scores ≈ 0.4–0.5,
+the invented ones ≥ 0.8 (Terminator, 2026-10-17); the no-speech
+probability alone does not separate them, a radio voice reaches 0.89.
+Real lines the VAD misses
 (shouting over music) score well inside those limits.  The loudness
 of the audio does not tell the two apart: music is as loud as speech.
 #+begin_src python
@@ -493,6 +516,7 @@ def strip_punct(t): return re.sub(r"[、。！？!?，,.\s『』「」\"']", "",
 
 SILENT_NSP, SILENT_LP = 0.65, -0.6
 RATE_MIN_CHARS = 6
+STOCK_NSP, STOCK_STRETCH = 0.7, 2.0
 
 def vad_silent(seg, vad):
     """the VAD hears (almost) no speech under the segment, ±0.3 s"""
@@ -508,6 +532,8 @@ def bad_reason(seg, cfg, prompt, vad=None):
     n = len(strip_punct(t))
     if n >= RATE_MIN_CHARS and n/max(seg["end"] - seg["start"], 0.01) > cfg["max_rate"]: return "too fast"
     if any(h.lower() in t.lower() for h in cfg["hallu"]): return "hallucination"
+    if strip_punct(t).lower() in {strip_punct(s).lower() for s in cfg["stock"]} and (seg["no_speech_prob"] >= STOCK_NSP or
+            any(w["end"] - w["start"] > STOCK_STRETCH for w in seg.get("words", []))): return "stock phrase"
     if prompt:
         ts_, ps = strip_punct(t), strip_punct(prompt)
         if len(ts_) >= 6 and ts_ in ps: return "prompt-echo"
@@ -923,6 +949,9 @@ between the tokens (the fine VAD phrases — Whisper compresses pauses
 into the neighbouring tokens), for sentence punctuation and for a
 pause; when no legal boundary lies within the window the search
 widens to twice it, and only then is an illegal position accepted.
+A cue whose next word already lies past its edge gets no words —
+the search starts after the first word and would otherwise hand it
+one (どう|したんだ, once an invented line no longer filled that cue).
 Whole phrases far from any cue (≥ =OUTSIDE_GAP= s beyond the cue's
 edges, detached at a real gap of ≥ 0.5 s) are left for the free
 assembly.
@@ -963,6 +992,7 @@ def apportion(words, cues, cfg):
             if j < n and words[j-1]["end"] < s_ - OUTSIDE_GAP: outside += words[k:j]; k = j
             else: break
         if nxt is None: end = n
+        elif k < n and (words[k]["start"] + words[k]["end"])/2 >= B: end = k      # the next word is past the edge: nothing for this cue
         else:
             near = lambda win: [j for j in range(k+1, n) if abs((words[j-1]["end"] + words[j]["start"])/2 - B) <= win]
             legal = [j for j in near(APPORTION_WIN) if not illegal(words[j-1], words[j])] or [j for j in near(2*APPORTION_WIN) if not illegal(words[j-1], words[j])]
@@ -1735,14 +1765,40 @@ ASTREAM_AUTO=""; [ -z "$ASTREAM" ] && ASTREAM_AUTO="--astream-auto"
 *** Decode the audio
 Any container or codec =ffmpeg= reads; =-a N= selects the audio track
 of a video file.  16 kHz mono is what Whisper and the VAD want.
+
+The WAV must start at the container's time 0, not at the stream's
+first packet: a track added later with =mkvmerge --sync= (a dub taken
+from another disc) starts seconds in, and a plain decode drops that
+lead-in — the whole transcription then runs early by exactly that much
+(Terminator, 2026-10-17: 8.15 s).  =-copyts= keeps the packets'
+absolute times — the ones the cue scan of the subtitle tracks reads —
+and =aresample=async=1:first_pts=0= fills everything before the first
+packet with silence; without =-copyts= ffmpeg would count from the
+container's start, which in a stream-only =.mka= is the late track's
+own first packet.  A stamp records how and from which stream the
+WAV was made; when it differs the WAV is decoded again and every cache
+derived from it is dropped, since all of them hold its times.  The
+padding is checked, not trusted: the WAV must reach the end of the
+stream's last packet within 1 s, else the run stops.
 #+begin_src bash
-WAV="$WORK/audio16k.wav"
-if [ ! -f "$WAV" ] || [ "$INPUT" -nt "$WAV" ]
+WAV="$WORK/audio16k.wav"; STAMP="$WORK/audio16k.stamp"; STAMPV="pts0 a:$ASTREAM"
+if [ ! -f "$WAV" ] || [ "$INPUT" -nt "$WAV" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$STAMPV" ]
 then
     echo "-------------------------"
     echo "Decoding audio stream $ASTREAM of $INPUT to 16 kHz mono ..."
     echo "-------------------------"
-    ffmpeg -nostdin -v error -y -i "$INPUT" -map 0:a:$ASTREAM -ac 1 -ar 16000 -c:a pcm_s16le "$WAV"
+    rm -f "$STAMP" "$WORK"/{vad,vad_fine,regions,speakers,segments_prompt,segments_noprompt,segments_merged}.json
+    ffmpeg -nostdin -v error -y -copyts -i "$INPUT" -map 0:a:$ASTREAM -af aresample=async=1:first_pts=0 -ac 1 -ar 16000 -c:a pcm_s16le "$WAV"
+    TEND=$(ffprobe -v error -select_streams a:$ASTREAM -show_entries packet=pts_time,duration_time -of csv=p=0 "$INPUT" \
+               | awk -F, '$1 != "N/A" { e = $1 + ($2 == "N/A" ? 0 : $2); if (e > m) m = e } END { print m }')
+    TWAV=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$WAV")
+    if awk -v w="$TWAV" -v e="$TEND" 'BEGIN { exit !(w < e - 1) }'
+    then
+        echo "Error: the decoded audio is $TWAV s, but stream $ASTREAM runs to $TEND s:"
+        echo "       its lead-in was lost and every line would run early."
+        exit 1
+    fi
+    echo "$STAMPV" > "$STAMP"
 fi
 REFOPT=(); [ ! -z "$REF" ] && REFOPT=(--ref "$REF" --shift "$SHIFT")
 #+end_src
@@ -1811,7 +1867,8 @@ print(",".join(order) + "|" + ",".join(str(i) for i in old))' "$LANGCODE")"
     mkvmerge -o "$TMPMKV" "${SUBOPT[@]}" "$INPUT" --language 0:"$LANGCODE" --default-track-flag 0:no --sub-charset 0:UTF-8 "$OUT" --track-order "$ORDER" | grep -v '進行状況\|Progress' || true
     counts() { ffprobe -v error -count_packets -select_streams "$2" -show_entries stream=nb_read_packets -of csv=p=0 "$1" | tr '\n' ' '; }
     ntracks() { mkvmerge -J "$1" | "$PY" -c 'import json,sys; print(len(json.load(sys.stdin)["tracks"]))'; }
-    NOLD="$(ntracks "$INPUT")"; NNEW="$(ntracks "$TMPMKV")"; NEXP=$((NOLD + 1 - $(echo "$EXCL" | tr -cd , | wc -c) - ${EXCL:+1}))
+    NEXCL=0; [ -z "$EXCL" ] || NEXCL=$(( $(echo "$EXCL" | tr -cd , | wc -c) + 1 ))     # SRTs of our own replaced
+    NOLD="$(ntracks "$INPUT")"; NNEW="$(ntracks "$TMPMKV")"; NEXP=$((NOLD + 1 - NEXCL))
     if [ "$NNEW" -ne "$NEXP" ]
     then
         echo "Error: the remux has $NNEW tracks, expected $NEXP; the original is untouched, the remux is at $TMPMKV"
@@ -1822,7 +1879,7 @@ print(",".join(order) + "|" + ",".join(str(i) for i in old))' "$LANGCODE")"
         echo "Error: video/audio packet counts differ between the original and the remux; the original is untouched, the remux is at $TMPMKV"
         exit 1
     fi
-    mv -f "$TMPMKV" "$INPUT"
+    mv -f "$TMPMKV" "$INPUT"; MKVDONE=1
     echo "Updated: $INPUT ($NNEW tracks)"
     mkvmerge -J "$INPUT" | "$PY" -c 'import json,sys
 for t in json.load(sys.stdin)["tracks"]: print("   %2d %-9s %-22s %s" % (t["id"], t["type"], t["codec"], t["properties"].get("language", "")))'
@@ -1841,7 +1898,7 @@ fi
 *** Summary
 #+begin_src bash
 echo "-------------------------"
-if [ ! -z "$MKVOUT" ]
+if [ ! -z "$MKVDONE" ]
 then
     echo "MKV:       $INPUT (updated in place; SRT and review moved to the cache)"
 else
