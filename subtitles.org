@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.11.0 - description
+* subtitles - version 1.11.1 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -161,6 +161,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   dir's parent =/tmp/subtitles/models=.
 
 * Changelog
+** 1.11.1
+*** 2026-10-18_18-47-45 UTC (日曜日)
+**** A cue whose turn cannot be the line break is two cues, no longer two lines broken by length across the turn: a sentence chained over two reference cues held three utterances of two speakers, no break at either turn left both lines within 16 characters, and the length break buried the reply inside a line with no dash (Mission: Impossible III, 33:00: まっさらで自分が育った / 大昔を思い出せるかかすかに — now まっさらで, then - 自分が育った大昔を思い出せるか / - かすかに). A break by length is left for text without a turn; each part of a cut cue is checked for two speakers on its own. Under a two-speaker cue of the original a pause-less Whisper segment edge is such a turn too (33:31: ベンジーで読めたのかああそりゃ今 / 述べたように最悪の状態ではあるが — now ベンジーで読めたのか, then ああそりゃ今述べたように / 最悪の状態ではあるが).
 ** 1.11.0
 *** 2026-10-18_16-13-40 UTC (日曜日)
 **** Two speakers in one cue are marked: each line begins with the language's dash (Japanese "- ", the half-width hyphen and a space, as in Netflix's Japanese style guide — a long-vowel ー at a line's start would read as part of the word). The lines must part at a turn, and the change of voice must be seen: by the speaker labels, by a two-speaker cue of the original's subtitles over the cue (their lines begin with a dash), or — when the two lines lie under two cues of the original — by the lines' own voice embeddings (cosine similarity below 0.35). The last case is the common one in a dub that lags the original: one speaker's sentence ends in the next speaker's cue (Mission: Impossible III, 28:24: - 手下を捉えても何の情報も / - 本件の責任者は君か). The clustering cannot be trusted with it (that scene was one voice cluster), nor the VAD phrases (no silence between the speakers). Mission: Impossible III: 119 cues with two speakers of 1103.
@@ -1109,7 +1112,19 @@ part.  Each kind is tried in that order, and the first whose two lines
 both fit wins: a sentence end with a pause that would leave a line too
 long must not hide the pause-less turn just before it (レッツィー奥で
 問題があったの / 問題?こっちの方が緊急).
-Otherwise the two lines part at a sentence end, else at a clause end
+A change of voice or a clear turn where no break leaves two lines that
+fit makes the text two cues, cut at a sentence boundary: broken by
+length, the turn would land inside a line and the reply run on from the
+question (まっさらで自分が育った / 大昔を思い出せるかかすかに,
+Mission: Impossible III, 33:00 — three utterances, two speakers).
+Where a two-speaker cue of the check track lies over the words, a bare
+Whisper segment edge counts as such a turn too: the reply often follows
+the question with no pause, and the new segment is its only trace
+(ベンジーで読めたのかああそりゃ今 / 述べたように最悪の状態ではあるが,
+33:31 — -Benji. Did you recover anything? / -Yes. Yes.).  Without that
+evidence a pause-less segment edge is as often one speaker going on, and
+the text is not cut there.
+Without a turn the two lines part at a sentence end, else at a clause end
 (基づき / ファリスの任務参加を認めた), when both fit; only then is the
 text broken by length.  More than two lines' worth
 becomes two cues, split at the best boundary.
@@ -1133,8 +1148,13 @@ def turn_tiers(ws, cfg):
 def turn_points(ws, cfg):
     return next((tier for tier in turn_tiers(ws, cfg) if tier), [])
 
-def cue_text(ws, cfg):
-    """-> list of lines (1 or 2), or None when the text needs two cues"""
+def dialogue_over(ws, check):
+    """a two-speaker cue of the check track lies over the words"""
+    a, b = ws[0]["start"], ws[-1]["end"]
+    return any(d and min(e, b) - max(s, a) > 0.5*min(e - s, b - a) for s, e, d in check)
+
+def cue_text(ws, cfg, strict=True, check=()):
+    """-> list of lines (1 or 2), or None when the text needs two cues — strict: also when a turn cannot be the break"""
     n = cfg["maxline"]; tiers = turn_tiers(ws, cfg)
     full = clean_text(ws, cfg)
     if len(full) <= n and not any(tiers): return [full]
@@ -1142,6 +1162,7 @@ def cue_text(ws, cfg):
         # the most balanced break of the most preferred kind whose two lines both fit
         fit = [(abs(len(a) - len(b)), [a, b]) for j in tier for a, b in [(clean_text(ws[:j], cfg), clean_text(ws[j:], cfg))] if len(a) <= n and len(b) <= n]
         if fit: return min(fit, key=lambda f: f[0])[1]
+    if strict and (tiers[0] or tiers[1] or (tiers[2] and dialogue_over(ws, check))): return None   # a break by length would bury the turn
     if len(full) <= 2*n:
         # no turn: a sentence or clause end whose two lines both fit, before a break by length alone
         for kind in ("se", "cl"):
@@ -1189,10 +1210,10 @@ def sentence_break(a, b, cfg, phrases):
         if phrases[b["phr"]]["start"] - phrases[a["phr"]]["end"] >= SENT_PAUSE: return True
     return False
 
-def fits(ws, cfg):
+def fits(ws, cfg, check=()):
     """one cue: on screen at most MAX_DUR with its lead-in and linger, two lines that each fit"""
     if ws[-1]["end"] - ws[0]["start"] > MAX_DUR - LEAD - LINGER or len(clean_text(ws, cfg)) > 2*cfg["maxline"]: return False
-    lines = cue_text(ws, cfg)
+    lines = cue_text(ws, cfg, check=check)
     return lines is not None and all(len(l) <= cfg["maxline"] for l in lines)
 
 def cut_kind(ws, j, cfg, phrases):
@@ -1203,17 +1224,17 @@ def cut_kind(ws, j, cfg, phrases):
     if (b.get("wb") or 0) < 0: return 2
     return 3
 
-def split_sentence(ws, cfg, phrases):
+def split_sentence(ws, cfg, phrases, check=()):
     """a chain of words -> parts that each fit one cue, cut at the best kind of boundary, most balanced first"""
-    if len(ws) < 2 or fits(ws, cfg): return [ws]
+    if len(ws) < 2 or fits(ws, cfg, check): return [ws]
     def key(j):
         la, lb = len(clean_text(ws[:j], cfg)), len(clean_text(ws[j:], cfg))
         kind = cut_kind(ws, j, cfg, phrases)
         return (kind + (2 if kind and min(la, lb) < 4 else 0), abs(la - lb))
     j = min(range(1, len(ws)), key=key)
-    return split_sentence(ws[:j], cfg, phrases) + split_sentence(ws[j:], cfg, phrases)
+    return split_sentence(ws[:j], cfg, phrases, check) + split_sentence(ws[j:], cfg, phrases, check)
 
-def sentence_groups(groups, cues, cfg, phrases):
+def sentence_groups(groups, cues, cfg, phrases, check=()):
     """-> (cue windows, word groups): reference groups whose shared edge lies inside a sentence joined, each chain cut where it must"""
     chains = []
     for i, g in enumerate(groups):
@@ -1224,7 +1245,7 @@ def sentence_groups(groups, cues, cfg, phrases):
     win, out = [], []
     for ws, idx in chains:
         if len(idx) == 1: win.append(cues[idx[0]]); out.append(ws); continue
-        parts = split_sentence(ws, cfg, phrases)
+        parts = split_sentence(ws, cfg, phrases, check)
         for k, p_ in enumerate(parts):
             win.append((cues[idx[0]][0] if k == 0 else p_[0]["start"], cues[idx[-1]][1] if k == len(parts)-1 else p_[-1]["end"], ""))
             out.append(p_)
@@ -1348,7 +1369,7 @@ def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None, check=(),
     mark_word_boundaries(segs, cfg)
     words = sorted((w for seg in segs for w in seg["words"] if w["w"].strip()), key=lambda w: w["start"])
     groups, outside = apportion(words, cues, cfg)
-    cues, groups = sentence_groups(groups, cues, cfg, phrases)
+    cues, groups = sentence_groups(groups, cues, cfg, phrases, check)
     lean = whisper_lean(phrases) if phrases else 0.2
     print("  timing: Whisper's word times lean %.2f s early against the speech; corrected" % lean, flush=True)
     out = []
@@ -1360,12 +1381,18 @@ def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None, check=(),
         sp_st, sp_en = speech_edges(g, phrases, prev_last, next_first, lean)
         st = sp_st - LEAD if phrases and g[0].get("phr") is not None else min(s_, sp_st - LEAD)
         en = max(e_, sp_en + LINGER)
-        lines = cue_text(g, cfg)
+        lines = cue_text(g, cfg, check=check)
         if lines is None:
-            j = split_cue(g, cfg); ga, gb = g[:j], g[j:]
-            tb = (ga[-1]["end"] + gb[0]["start"])/2
-            out.append(dict(start=st, end=max(tb - GAP, st + MIN_DUR), text="\n".join(cue_text(ga, cfg) or [clean_text(ga, cfg)]), logprob=conf(ga), multi=False, sp_st=sp_st, sp_en=tb))
-            out.append(dict(start=tb, end=en, text="\n".join(cue_text(gb, cfg) or [clean_text(gb, cfg)]), logprob=conf(gb), multi=False, sp_st=tb, sp_en=sp_en))
+            # a turn that cannot be the line break, or more than two lines: cut at a sentence boundary first
+            parts = split_sentence(g, cfg, phrases, check) if len(clean_text(g, cfg)) <= 2*cfg["maxline"] else []
+            if len(parts) < 2: j = split_cue(g, cfg); parts = [g[:j], g[j:]]
+            tbs = [sp_st] + [(a[-1]["end"] + b[0]["start"])/2 for a, b in zip(parts, parts[1:])] + [sp_en]
+            for k, p_ in enumerate(parts):
+                a_, b_ = tbs[k], tbs[k+1]
+                pl = cue_text(p_, cfg, check=check) or cue_text(p_, cfg, strict=False) or [clean_text(p_, cfg)]
+                if len(pl) == 2 and two_speakers(p_, pl, cfg, check, a_, b_, x if voices else None, sr, lean): pl = [cfg["dash"] + l for l in pl]
+                out.append(dict(start=st if k == 0 else a_, end=en if k == len(parts)-1 else max(b_ - GAP, (st if k == 0 else a_) + MIN_DUR),
+                                text="\n".join(pl), logprob=conf(p_), multi=False, sp_st=a_, sp_en=b_))
         else:
             if len(lines) == 2 and two_speakers(g, lines, cfg, check, sp_st, sp_en, x if voices else None, sr, lean): lines = [cfg["dash"] + l for l in lines]
             out.append(dict(start=st, end=en, text="\n".join(lines), logprob=conf(g), multi=len(lines) == 2 and len(turn_points(g, cfg)) > 0, sp_st=sp_st, sp_en=sp_en))
