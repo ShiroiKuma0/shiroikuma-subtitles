@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.8.6 - description
+* subtitles - version 1.11.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -26,7 +26,10 @@ builds subtitles from the dub's own word timestamps.
 
 ** Pipeline
 1. Decode the audio to 16 kHz mono WAV (=ffmpeg=, any container), from
-   the container's time 0 — a track that starts late is padded.
+   the container's time 0 — a track that starts late is padded.  Of a
+   surround track only the centre channel, where the dialogue is.  The
+   check track is chosen too: the original's subtitles, by default
+   the fullest text track in the language of another audio stream.
 2. Speech regions: the reference SRT's cues, padded 0.4 s before and
    0.6 s after and merged across gaps of ≤ 1 s, united with anything
    a VAD (Silero) hears outside them.  Without a reference SRT the VAD
@@ -47,10 +50,13 @@ builds subtitles from the dub's own word timestamps.
    of voice inside a cue is placed at a legal token boundary near the
    silence, and is where the cue's two lines part.  Reliable on a
    scene, less so over a whole film — see the changelog.
-6. Assembly, driven by the reference: one cue per reference cue.  The
-   words are apportioned to the cues at the best legal token boundary
-   within ±1 s of each reference edge — sentence punctuation or a pause
-   preferred, never inside a word.  A cue's timing follows its speech:
+6. Assembly, driven by the reference.  The words are apportioned to
+   the reference cues at the best legal token boundary within ±1 s of
+   each reference edge — sentence punctuation or a pause preferred,
+   never inside a word.  Then whole sentences: neighbouring cues whose
+   shared edge falls inside one sentence of the dub are joined, and a
+   chain too long for one cue is cut at a sentence end, else a clause
+   end — never merely where the reference's cue ended.  A cue's timing follows its speech:
    it starts at the VAD phrase holding its first word (the reference
    start when that is earlier) and ends 0.4 s after the phrase holding
    its last word ends — the reference end is only a floor, since the
@@ -62,8 +68,11 @@ builds subtitles from the dub's own word timestamps.
    Speech the reference has no cue for is cut at pauses ≥ 0.7 s and
    sentence ends into cues of its own.  Without a reference everything
    goes that way.
-7. Checks: VAD speech left without a line, the lowest-confidence lines,
-   written to a review report beside the SRT.
+7. Checks: every speech cue of the check track that no Whisper
+   segment covers is transcribed again on its own window (before the
+   assembly), and the check is repeated on the written cues; cues still
+   without a line, VAD speech left without a line and the
+   lowest-confidence lines go into a review report beside the SRT.
 
 ** Lessons baked in (from the first use, The Thin Red Line, 2026-09-16)
 - The reference SRT and the audio *must be on the same timeline*; a
@@ -102,6 +111,11 @@ subtitles.sh [options] INPUT            INPUT: any audio or video file ffmpeg re
   -f            force re-transcription, ignore cached passes
   -d on|off     speaker separation (default on): two speakers in one cue go
                 on separate lines
+  -v CHECK.srt  the original's subtitles: every line of it must get a line
+                (default: the fullest text track inside INPUT in the language
+                of another audio stream; "-v none" for no check)
+  -c CHANNEL    auto|center|mix: decode only the centre channel of a surround
+                dub, where the dialogue is (default auto: when it has one)
   -M            update the input MKV in place: the SRT goes in before the
                 first subtitle track of LANG (text before bitmap), after all
                 subtitles when there is none; verified before replacing; the
@@ -147,6 +161,18 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   dir's parent =/tmp/subtitles/models=.
 
 * Changelog
+** 1.11.0
+*** 2026-10-18_16-13-40 UTC (日曜日)
+**** Two speakers in one cue are marked: each line begins with the language's dash (Japanese "- ", the half-width hyphen and a space, as in Netflix's Japanese style guide — a long-vowel ー at a line's start would read as part of the word). The lines must part at a turn, and the change of voice must be seen: by the speaker labels, by a two-speaker cue of the original's subtitles over the cue (their lines begin with a dash), or — when the two lines lie under two cues of the original — by the lines' own voice embeddings (cosine similarity below 0.35). The last case is the common one in a dub that lags the original: one speaker's sentence ends in the next speaker's cue (Mission: Impossible III, 28:24: - 手下を捉えても何の情報も / - 本件の責任者は君か). The clustering cannot be trusted with it (that scene was one voice cluster), nor the VAD phrases (no silence between the speakers). Mission: Impossible III: 119 cues with two speakers of 1103.
+** 1.10.0
+*** 2026-10-18_15-58-08 UTC (日曜日)
+**** Whole sentences in one cue: the reference's division into cues is made for its own language — an English track cuts a long sentence into ≈ 2-s cues for reading — and the dub's sentence was cut at every one of those edges (Mission: Impossible III, 28:05–28:16: two sentences in five cues, 私は君の評価に基づき | ファリスの任務参加を認めた). Neighbouring reference cues whose edge lies inside one sentence (no sentence end — for Japanese a final form or final particle from MeCab, Whisper's Japanese has little punctuation — no Whisper segment edge, no pause, no change of voice) are now one cue; a chain too long for two lines or 7 s is cut at a sentence end, else a clause end (、, ば, が, ながら, a 連用形 such as 基づき), else a bunsetsu end, the most balanced first. On Mission: Impossible III 1200 cues become 1103.
+**** Two lines without a turn part at a sentence end, else a clause end, when both lines fit — before a break by length alone (基づき / ファリスの任務参加を認めた, was 基づきファリスの / 任務参加を認めた).
+** 1.9.0
+*** 2026-10-18_14-15-45 UTC (日曜日)
+**** Fix strings of dialogue without a line in action scenes (Mission: Impossible III: 365 of 1208 English lines had no Japanese one, 13:50–25:30 nearly all of them). Whisper only transcribes where a reference cue or the VAD says someone speaks; without a reference the VAD alone decided, and under gunfire, rotors and score it hears nothing — 319 of those 365 lines had no VAD speech under them, so they were never transcribed.
+**** Verification against the original's subtitles (-v, default: the fullest text track in the language of another audio stream, else the reference): every speech cue of it that no Whisper segment covers is transcribed again on its own window — without the VAD's silence test, the VAD being what failed — and the new words are added; after the assembly the check is repeated on the written cues. The review and the summary give how many check cues are still without a line, list each with its original text, and warn above 3 %. Without any check track the summary says the coverage is unverified.
+**** Of a surround dub only the centre channel is decoded (-c auto, the default; -c mix for the old downmix): the dialogue is there, the effects and the score around it. On the same scene the VAD hears 67 of 117 lines instead of 49, and Whisper's no-speech probability on them falls from ≈ 0.6 to ≈ 0.35 — lines it wrote as ご視聴ありがとうございました or not at all in the downmix come out right. A silent centre channel falls back to the downmix. The WAV is decoded again on the first run (the stamp records the channel), and its caches with it.
 ** 1.8.6
 *** 2026-10-17_13-05-00 UTC (土曜日)
 **** Fix: a re-run after -M (which rewrites the MKV) transcribed the whole film again: the audio is decoded again, but the caches are kept when it is identical. A re-run no longer takes the tool's own SRT inserted by -M as the reference when the other tracks are SubRip too. Speaker labels: a word outside every VAD phrase has no voice and no longer crashes the label smoothing.
@@ -269,7 +295,7 @@ punctuation, lower case), and how a name
 list is turned into a prompt.  Unknown languages get the "_" entry.
 #+begin_src python
 LANG = {
-    "ja": dict(maxline=16, max_rate=30, spaces=False, punct_end="。！？!?", strip_end="。", sep="、", stop="。", dash="",
+    "ja": dict(maxline=16, max_rate=30, spaces=False, punct_end="。！？!?", strip_end="。", sep="、", stop="。", dash="- ",
                hallu=["ご視聴ありがとう", "チャンネル登録", "字幕", "おやすみなさい",
                       "ご覧いただ", "次回", "最後まで", "吹き替え", "登場人物", "映画の映像"],
                stock={"ありがとうございました", "ありがとうございます", "それではまた", "それでは", "またね",
@@ -596,13 +622,16 @@ def merge_passes(A, B, regions, vad, cfg, prompt, names):
         else:
             out += b_ok; used["noprompt"] += 1
     out.sort(key=lambda s: s["start"])
+    normalise_names(out, names)
+    return out, used, dropped
+
+def normalise_names(segs, names):
     for canon, variants in names.items():
         for v in variants:
-            for s in out:
+            for s in segs:
                 if v in s["text"]:
                     s["text"] = s["text"].replace(v, canon)
                     for w in s["words"]: w["w"] = w["w"].replace(v, canon)
-    return out, used, dropped
 #+end_src
 *** Speakers
 **** Phrases
@@ -811,26 +840,49 @@ def ja_boundaries(text):
                 out[off] = bonus
         off += len(surf); prev = (surf, pos)
     return out
+
+FINAL_FORMS = ("終止形", "命令形", "意志推量形")
+
+def ja_breaks(text):
+    """-> (sentence ends, clause ends): char offsets right after a sentence-final word — a final particle, or a verb,
+    adjective or auxiliary in a final form with no particle or auxiliary after it — and after a clause-final one —
+    a conjunctive particle (ば, が, ながら, て), or a verb or adjective in its 連用形 followed by a new word (基づき|ファリス)"""
+    tg = tagger()
+    if tg is None: return set(), set()
+    ws = list(tg(text)); se, cl = set(), set(); off = 0
+    for k, w in enumerate(ws):
+        off += len(w.surface); f = w.feature; nx = ws[k+1].feature if k+1 < len(ws) else None
+        attached = nx is not None and nx.pos1 in ATTACH_NEXT
+        if f.pos2 == "終助詞" and not (nx is not None and nx.pos2 == "終助詞"): se.add(off)
+        elif f.pos1 in ("動詞", "形容詞", "助動詞") and (f.cForm or "").startswith(FINAL_FORMS) and not attached: se.add(off)
+        elif f.pos2 == "接続助詞" and not attached: cl.add(off)
+        elif f.pos1 in ("動詞", "形容詞") and (f.cForm or "").startswith("連用形") and nx is not None and nx.pos1 in HEAD_POS: cl.add(off)
+    return se, cl
 #+end_src
 **** Marking the tokens
 Every token gets =wb=: the boundary bonus at its start when a line may
 start there, =None= when it may not; tokens across segment edges always
-may.
+may.  And =se= / =cl= when a sentence or a clause ends with it — for
+Japanese from MeCab, since Whisper's Japanese often has no punctuation
+at all; for spaced languages from the punctuation.
 #+begin_src python
 def mark_word_boundaries(segs, cfg):
     for seg in segs:
         ws = [w for w in seg["words"] if w["w"].strip()]
         if not ws: continue
         if cfg["spaces"]:
-            for k, w in enumerate(ws): w["wb"] = 0.0 if k else -0.4
+            for k, w in enumerate(ws):
+                w["wb"] = 0.0 if k else -0.4
+                w["se"] = bool(re.search("[" + re.escape(cfg["punct_end"]) + "]$", w["w"].strip())); w["cl"] = bool(re.search(r"[,;:]$", w["w"].strip()))
             continue
-        text = "".join(w["w"].strip() for w in ws); jb = ja_boundaries(text)
+        text = "".join(w["w"].strip() for w in ws); jb = ja_boundaries(text); se, cl = ja_breaks(text)
         off = 0
         for k, w in enumerate(ws):
             if k == 0: w["wb"] = -0.4
             elif jb is None: w["wb"] = None if illegal_chars(ws[k-1], w) else 0.0
             else: w["wb"] = jb.get(off)
             off += len(w["w"].strip())
+            w["se"] = off in se; w["cl"] = off in cl or w["w"].strip()[-1:] in "、，,"
 #+end_src
 *** Subtitle building
 **** Units from word timestamps
@@ -1057,7 +1109,9 @@ part.  Each kind is tried in that order, and the first whose two lines
 both fit wins: a sentence end with a pause that would leave a line too
 long must not hide the pause-less turn just before it (レッツィー奥で
 問題があったの / 問題?こっちの方が緊急).
-Otherwise the text is broken by length.  More than two lines' worth
+Otherwise the two lines part at a sentence end, else at a clause end
+(基づき / ファリスの任務参加を認めた), when both fit; only then is the
+text broken by length.  More than two lines' worth
 becomes two cues, split at the best boundary.
 #+begin_src python
 TURN_GAP = 0.25
@@ -1088,13 +1142,156 @@ def cue_text(ws, cfg):
         # the most balanced break of the most preferred kind whose two lines both fit
         fit = [(abs(len(a) - len(b)), [a, b]) for j in tier for a, b in [(clean_text(ws[:j], cfg), clean_text(ws[j:], cfg))] if len(a) <= n and len(b) <= n]
         if fit: return min(fit, key=lambda f: f[0])[1]
-    if len(full) <= 2*n: return break_lines(full, cfg).split("\n")
+    if len(full) <= 2*n:
+        # no turn: a sentence or clause end whose two lines both fit, before a break by length alone
+        for kind in ("se", "cl"):
+            fit = [(abs(len(a) - len(b)), [a, b]) for j in range(1, len(ws)) if ws[j-1].get(kind) and not illegal(ws[j-1], ws[j])
+                   for a, b in [(clean_text(ws[:j], cfg), clean_text(ws[j:], cfg))] if len(a) <= n and len(b) <= n and min(len(a), len(b)) >= 3]
+            if fit: return min(fit, key=lambda f: f[0])[1]
+        return break_lines(full, cfg).split("\n")
     return None
 
 def split_cue(ws, cfg):
     """best token boundary to divide an overlong cue in two"""
     mid = (ws[0]["start"] + ws[-1]["end"])/2
     return min(range(1, len(ws)), key=lambda j: boundary_score(ws, j, mid, cfg))
+#+end_src
+**** Whole sentences across reference cues
+The reference's division into cues serves its own language: an English
+track cuts a long sentence into cues of ≈ 2 s for reading, and the
+dub says the same passage as one sentence — apportioned cue by cue it
+came out in pieces cut at the English edges (私は君の評価に基づき |
+ファリスの任務参加を認めた, Mission: Impossible III, 28:05–28:16: two
+sentences in five cues).  So consecutive reference groups (≤
+=JOIN_CUE_GAP= apart) are chained wherever the words across their
+edge lie inside one sentence — no sentence end (punctuation or, for
+Japanese, a final form or final particle), no Whisper segment edge, no
+pause of =TURN_GAP= or a VAD silence of =SENT_PAUSE=, no change of
+voice.  A chain is one cue when it fits — two lines that each fit, =MAX_DUR=
+on screen —
+else it is cut where it must be, the best kind of cut first: a
+sentence end, then a clause end (、, ば, が, ながら, a 連用形 such as
+基づき), then the end of a bunsetsu, then any legal boundary; the most
+balanced of that kind, and again on each part until every part
+fits.  A cue keeps its reference start and end as a floor only where
+it begins or ends a chain; a part cut out of a chain takes its words'
+own edges.
+#+begin_src python
+SENT_PAUSE, JOIN_CUE_GAP = 0.35, 1.0
+
+def sentence_break(a, b, cfg, phrases):
+    """the words a | b do not lie inside one sentence"""
+    if a.get("se") or re.search("[" + re.escape(cfg["punct_end"]) + "]$", a["w"].strip()): return True
+    if a.get("seg") is not None and b.get("seg") is not None and a["seg"] != b["seg"]: return True
+    if b["start"] - a["end"] >= TURN_GAP: return True
+    if a.get("spk") is not None and b.get("spk") is not None and a["spk"] != b["spk"]: return True
+    if phrases and a.get("phr") is not None and b.get("phr") is not None and a["phr"] != b["phr"]:
+        if phrases[b["phr"]]["start"] - phrases[a["phr"]]["end"] >= SENT_PAUSE: return True
+    return False
+
+def fits(ws, cfg):
+    """one cue: on screen at most MAX_DUR with its lead-in and linger, two lines that each fit"""
+    if ws[-1]["end"] - ws[0]["start"] > MAX_DUR - LEAD - LINGER or len(clean_text(ws, cfg)) > 2*cfg["maxline"]: return False
+    lines = cue_text(ws, cfg)
+    return lines is not None and all(len(l) <= cfg["maxline"] for l in lines)
+
+def cut_kind(ws, j, cfg, phrases):
+    a, b = ws[j-1], ws[j]
+    if illegal(a, b): return 9
+    if sentence_break(a, b, cfg, phrases): return 0
+    if a.get("cl"): return 1
+    if (b.get("wb") or 0) < 0: return 2
+    return 3
+
+def split_sentence(ws, cfg, phrases):
+    """a chain of words -> parts that each fit one cue, cut at the best kind of boundary, most balanced first"""
+    if len(ws) < 2 or fits(ws, cfg): return [ws]
+    def key(j):
+        la, lb = len(clean_text(ws[:j], cfg)), len(clean_text(ws[j:], cfg))
+        kind = cut_kind(ws, j, cfg, phrases)
+        return (kind + (2 if kind and min(la, lb) < 4 else 0), abs(la - lb))
+    j = min(range(1, len(ws)), key=key)
+    return split_sentence(ws[:j], cfg, phrases) + split_sentence(ws[j:], cfg, phrases)
+
+def sentence_groups(groups, cues, cfg, phrases):
+    """-> (cue windows, word groups): reference groups whose shared edge lies inside a sentence joined, each chain cut where it must"""
+    chains = []
+    for i, g in enumerate(groups):
+        if not g: continue
+        if chains and cues[i][0] - cues[chains[-1][1][-1]][1] <= JOIN_CUE_GAP and not sentence_break(chains[-1][0][-1], g[0], cfg, phrases):
+            chains[-1][0].extend(g); chains[-1][1].append(i)
+        else: chains.append([list(g), [i]])
+    win, out = [], []
+    for ws, idx in chains:
+        if len(idx) == 1: win.append(cues[idx[0]]); out.append(ws); continue
+        parts = split_sentence(ws, cfg, phrases)
+        for k, p_ in enumerate(parts):
+            win.append((cues[idx[0]][0] if k == 0 else p_[0]["start"], cues[idx[-1]][1] if k == len(parts)-1 else p_[-1]["end"], ""))
+            out.append(p_)
+    return win, out
+#+end_src
+**** Two speakers in one cue
+A cue whose two lines are two speakers marks each line with the
+language's =dash= — for Japanese the half-width hyphen and a space
+(=- まさか= / =- もちろん=), as in Netflix's Japanese style guide; a
+long-vowel ー at a line's start would read as part of the word.  The lines must part
+at a turn — not at a break by length — and then one of three things
+must say that the voice changes there:
+- the speaker labels of the two lines differ;
+- a two-speaker cue of the check track lies over the cue's speech —
+  the original's subtitles begin each speaker's line with a dash
+  (=-I am, sir.= / =-I'm not on you yet.=);
+- the two lines lie under two different cues of the check track and
+  their own voices differ: an ECAPA embedding of each line's audio
+  (Whisper's word span corrected by its lean, at least 1 s) with a
+  cosine similarity below =SPK_CONTRAST=.  The dub lags the original,
+  so the end of one speaker's sentence lands in the next speaker's
+  cue (手下を捉えても何の情報も / 本件の責任者は君か, Mission:
+  Impossible III, 28:24).  Neither of the other two sees it: over a
+  whole film the clustering often puts a scene's voices into one
+  cluster, and with no silence between the speakers both lines share
+  one VAD phrase and its embedding.  On the 37 such cues of that film
+  20 of 25 real turns fall below the cut and 8 of 12 lines of one
+  speaker stay above it — the check cue alone would have dashed all 37.
+#+begin_src python
+def dialogue_cue(text):
+    """a subtitle cue holding two speakers: a dash opens a line, or follows a sentence end inside one, at least twice — or
+    once where it is not the cue's very start (the second speaker only)"""
+    t = re.sub(r"</?[^>]+>|\{[^}]*\}", "", text).strip()
+    marks = [m.start() for m in re.finditer(r"(?:^|\n|(?<=[.!?…\"'♪])\s+)\s*[-–—]\s*(?=\S)", t)]
+    return len(marks) >= 2 or (len(marks) == 1 and marks[0] > 0)
+
+_ENC = None
+def line_voice(x, sr, a, b):
+    """ECAPA embedding of the audio a..b (at least 1 s, centred)"""
+    global _ENC
+    import torch
+    if _ENC is None:
+        from speechbrain.inference.speaker import EncoderClassifier
+        _ENC = EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb", savedir=os.path.join(MODELS_DIR, "ecapa"), run_opts={"device": "cuda:0"})
+    if b - a < 1.0: m = (a + b)/2; a, b = m - 0.5, m + 0.5
+    a0, b0 = max(0, int(a*sr)), min(len(x), int(b*sr))
+    with torch.no_grad(): e = _ENC.encode_batch(torch.from_numpy(x[a0:b0]).unsqueeze(0).to("cuda:0")).squeeze().cpu().numpy()
+    return e/(np.linalg.norm(e) + 1e-9)
+
+def two_speakers(g, lines, cfg, check, sp_st, sp_en, x=None, sr=None, lean=0.2):
+    """the two lines of a cue are two speakers: they part at a turn, and the voices differ, or the check track has a
+    two-speaker cue here, or the lines lie under two check cues and their own voices differ"""
+    j = next((j for j in range(1, len(g)) if clean_text(g[:j], cfg) == lines[0]), None)
+    if j is None: return False
+    voice, pts, weak = turn_tiers(g, cfg)
+    if j in voice: return True
+    if j not in pts and j not in weak: return False
+    for s, e, dlg in check:
+        if dlg and min(e, sp_en) - max(s, sp_st) > 0.5*min(e - s, sp_en - sp_st): return True
+    if x is None: return False
+    def under(ws):
+        m = float(np.median([(w["start"] + w["end"])/2 for w in ws]))
+        return next((k for k, (s, e, _) in enumerate(check) if s <= m <= e + 0.3), None)
+    ka, kb = under(g[:j]), under(g[j:])
+    if ka is None or kb is None or ka == kb: return False
+    va = line_voice(x, sr, g[0]["start"] + lean, g[j-1]["end"] + lean); vb = line_voice(x, sr, g[j]["start"] + lean, g[-1]["end"] + lean)
+    return float(va @ vb) < SPK_CONTRAST
 #+end_src
 **** Speech edges of a group of words
 The VAD phrases give the real edges of the speech: a cue's speech
@@ -1139,7 +1336,7 @@ def conf(ws):
     """mean word probability of a cue (0..1)"""
     p = [w.get("p", 1.0) for w in ws]; return sum(p)/len(p) if p else 1.0
 
-def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None):
+def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None, check=(), voices=True):
     for si, seg in enumerate(segs):
         for w in seg["words"]: w["seg"] = si
     phrases = None
@@ -1151,6 +1348,7 @@ def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None):
     mark_word_boundaries(segs, cfg)
     words = sorted((w for seg in segs for w in seg["words"] if w["w"].strip()), key=lambda w: w["start"])
     groups, outside = apportion(words, cues, cfg)
+    cues, groups = sentence_groups(groups, cues, cfg, phrases)
     lean = whisper_lean(phrases) if phrases else 0.2
     print("  timing: Whisper's word times lean %.2f s early against the speech; corrected" % lean, flush=True)
     out = []
@@ -1169,6 +1367,7 @@ def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None):
             out.append(dict(start=st, end=max(tb - GAP, st + MIN_DUR), text="\n".join(cue_text(ga, cfg) or [clean_text(ga, cfg)]), logprob=conf(ga), multi=False, sp_st=sp_st, sp_en=tb))
             out.append(dict(start=tb, end=en, text="\n".join(cue_text(gb, cfg) or [clean_text(gb, cfg)]), logprob=conf(gb), multi=False, sp_st=tb, sp_en=sp_en))
         else:
+            if len(lines) == 2 and two_speakers(g, lines, cfg, check, sp_st, sp_en, x if voices else None, sr, lean): lines = [cfg["dash"] + l for l in lines]
             out.append(dict(start=st, end=en, text="\n".join(lines), logprob=conf(g), multi=len(lines) == 2 and len(turn_points(g, cfg)) > 0, sp_st=sp_st, sp_en=sp_en))
     # speech the reference has no cue for
     if outside:
@@ -1190,8 +1389,68 @@ def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None):
             if b["end"] - b["start"] < 0.5: b["end"] = b["start"] + 0.5
     return [(c["start"], c["end"], c["text"], c["logprob"], c["multi"]) for c in out]
 #+end_src
+*** Verification against the original's subtitles
+The VAD is not to be trusted with the dialogue of an action scene:
+under gunfire, rotors and score it hears nothing, and without a
+reference cue there Whisper is never asked (Mission: Impossible III,
+2026-10-18: 319 of 365 English lines without a Japanese one had no VAD
+speech under them; run on those cue windows alone, Whisper heard
+nearly every one).  So the film's own subtitles in the original
+language — the check track, by default the fullest text track in the
+language of another audio stream — are the list of what must be
+spoken: every speech cue of it that no kept Whisper segment covers by
+=CHECK_MIN= is transcribed again on its own (padded, neighbours within
+=CHECK_JOIN= in one window, unprompted, cached in
+=segments_rescue.json=).  What Whisper hears there passes the usual
+filters except the VAD's silence test — the VAD is what failed — and
+only the words that no kept segment already holds are added.  After
+the assembly the check is run once more against the written cues, and
+whatever is still without a line goes into the review with its
+original text — a dub sometimes leaves a line out, but that is for a
+human to see, not to be lost silently.
+#+begin_src python
+CHECK_MIN, CHECK_JOIN = 0.25, 1.0   # a check cue counts as voiced when lines cover this share of it; missing cues this close share one window
+CHECK_WARN = 0.03                   # more than this share of check cues still without a line is reported loudly
+
+def unvoiced(check, spans):
+    """check cues that the spans cover by less than CHECK_MIN"""
+    spans = sorted(spans); starts = [a for a, _ in spans]
+    out = []
+    for s, e, t in check:
+        near = spans[bisect.bisect_left(starts, s - MAX_REGION - 2):bisect.bisect_right(starts, e)]
+        if sum(max(0.0, min(e, b) - max(s, a)) for a, b in near) < CHECK_MIN*max(e - s, 0.01): out.append((s, e, t))
+    return out
+
+def rescue(x, sr, segs, check, lang, model_name, cfg, cache):
+    """-> segments plus what Whisper hears in the check cues left without one, the rescues [(start, end, check text, new text)], the dropped"""
+    miss = unvoiced(check, [(g["start"], g["end"]) for g in segs])
+    if not miss: return segs, [], []
+    total = len(x)/sr; wins = []
+    for s, e, t in miss:
+        if wins and s - wins[-1][1] <= CHECK_JOIN and e - wins[-1][0] <= MAX_REGION - PAD_BEFORE - PAD_AFTER:
+            wins[-1][1] = e; wins[-1][2].append(t)
+        else: wins.append([s, e, [t]])
+    regions = [[max(0.0, s - PAD_BEFORE), min(total, e + PAD_AFTER)] for s, e, _ in wins]
+    print("  check: %d of %d check cues without a line, %d windows transcribed on their own" % (len(miss), len(check), len(wins)), flush=True)
+    new = transcribe(x, sr, regions, lang, model_name, None, cache, label="rescue window")
+    spans = [(g["start"], g["end"]) for g in segs]; added = []; rescues = []; dropped = []
+    for k, (s, e, texts) in enumerate(wins):
+        got = []
+        for h in (h for h in new if h["region"] == k):
+            why = bad_reason(h, cfg, None)
+            if why: dropped.append((h, "rescue: " + why)); continue
+            words = [w for w in h["words"] if w["w"].strip() and not any(a <= (w["start"] + w["end"])/2 <= b for a, b in spans)]
+            if not words or not re.search(r"\w", "".join(w["w"] for w in words)): continue
+            g = dict(h, words=words, start=words[0]["start"], end=words[-1]["end"], text="".join(w["w"] for w in words), region=-1, rescued=True)
+            got.append(g); spans.append((g["start"], g["end"]))
+        added += got
+        rescues.append((s, e, " / ".join(t.replace("\n", " ") for t in texts), "".join(g["text"].strip() for g in got)))
+    out = sorted(segs + added, key=lambda g: g["start"])
+    return out, rescues, dropped
+#+end_src
 *** Review report
-VAD speech left without a line, the lowest-confidence lines, and
+VAD speech left without a line, the check cues still without one, the
+lines recovered from check cues, the lowest-confidence lines, and
 every dropped segment with its reason.
 #+begin_src python
 def uncovered(cues, vad):
@@ -1199,13 +1458,21 @@ def uncovered(cues, vad):
     for c in cues: cov[int(c[0]*10):int(c[1]*10)+1] = 1
     return [(s, e) for s, e in vad if e-s >= 0.8 and int(e*10) < len(cov) and cov[int(s*10):int(e*10)].mean() < 0.3]
 
-def write_report(path, cues, vad, used, dropped, ref_count):
+def write_report(path, cues, vad, used, dropped, ref_count, check=(), check_note=""):
     miss = uncovered(cues, vad); low = [c for c in cues if (c[3] < LOW_CONF if c[3] <= 0 else c[3] < 0.5)]; multi = [c for c in cues if c[4]]
+    still = unvoiced(check, [(c[0], c[1]) for c in cues]); rescues = used.get("rescues", [])
     with open(path, "w", encoding="utf-8") as f:
         f.write("subtitles: %d cues written (reference had %d), %d two-line at a turn or sentence end\n" % (len(cues), ref_count, sum(1 for c in cues if c[4])))
+        if check: f.write("check against %s: %d of %d speech cues without a line (%.1f%%)%s\n" % (check_note, len(still), len(check), 100*len(still)/len(check), "  <- MORE THAN %d%%: SEE BELOW" % round(100*CHECK_WARN) if len(still) > CHECK_WARN*len(check) else ""))
+        else: f.write("check: no check track, the coverage of the dialogue is unverified\n")
         f.write("regions from the prompted pass: %d, from the unprompted pass: %d\n" % (used["prompt"], used["noprompt"]))
         f.write("VAD speech >= 0.8 s without a subtitle: %d chunks, %.1f min\n\n" % (len(miss), sum(e-s for s, e in miss)/60))
         for s, e in miss: f.write("   %s - %s (%.1f s)\n" % (hms(s), hms(e), e-s))
+        if check:
+            f.write("\nCheck cues still without a line (the dub may leave a line out — listen): %d\n\n" % len(still))
+            for s, e, t in still: f.write("%s --> %s  %s\n" % (fmt_time(s), fmt_time(e), t.replace("\n", " / ")))
+            f.write("\nCheck cues without a Whisper segment, transcribed on their own: %d windows, %d recovered\n\n" % (len(rescues), sum(1 for r in rescues if r[3])))
+            for s, e, t, new in rescues: f.write("%s --> %s  %s  =>  %s\n" % (fmt_time(s), fmt_time(e), t, new or "(nothing)"))
         f.write("\nLowest-confidence lines (mean word probability below 50%%, or segment logprob < %.1f): %d\n\n" % (LOW_CONF, len(low)))
         for s, e, t, lp, _ in low: f.write("%s --> %s  (%.2f)  %s\n" % (fmt_time(s), fmt_time(e), lp, t.replace("\n", " / ")))
         f.write("\nTwo-line cues at a turn or sentence end inside one reference cue: %d\n\n" % len(multi))
@@ -1215,7 +1482,7 @@ def write_report(path, cues, vad, used, dropped, ref_count):
         for s, e, old, new, ok in reps: f.write("%s --> %s  [%s]  %s  =>  %s\n" % (fmt_time(s), fmt_time(e), "repaired" if ok else "kept", old, new))
         f.write("\nDropped Whisper segments: %d\n\n" % len(dropped))
         for seg, why in dropped: f.write("%s --> %s  [%s]  %s\n" % (fmt_time(seg["start"]), fmt_time(seg["end"]), why, seg["text"].strip()))
-    return len(miss), len(low)
+    return len(miss), len(low), len(still)
 #+end_src
 *** Container tracks
 When the input is a container, the audio and the timing reference can
@@ -1300,10 +1567,12 @@ def cmd_tracks(a):
         for i, st in enumerate(audio):
             print("   -a %d   %-4s %-9s %s%s" % (i, st["lang"], st["codec"], st["title"], "   <- this one will be used" if i == chosen_a else ""))
     ref = a.ref; note = ""
+    tcues = text_subtitle_cues(a.input, subs, a.work) if subs and not (a.ref and a.check) else {}
+    check, cnote = choose_check(a, subs, audio, tcues)
     if ref == "none": ref = ""; note = "none (VAD only)"
     elif ref: note = os.path.basename(ref)
     elif subs:
-        cues = scan_subtitle_cues(a.input); cues.update(text_subtitle_cues(a.input, subs, a.work))
+        cues = scan_subtitle_cues(a.input); cues.update(tcues)
         cand = [(i, st, cues.get(st["index"], [])) for i, st in enumerate(subs)]
         full = [c for c in cand if not c[1]["forced"] and len(c[2]) >= 50]
         pref = [c for c in full if same_lang(c[1]["lang"], a.lang)]
@@ -1322,8 +1591,24 @@ def cmd_tracks(a):
         else: note = "none (no usable subtitle track: VAD only)"
     else: note = "none (no subtitle track in the input: VAD only)"
     with open(os.path.join(a.work, "choice.env"), "w") as f:
-        f.write("ASTREAM=%d\nREF=%s\nREFNOTE=%s\n" % (chosen_a, shell_quote(ref), shell_quote(note)))
+        f.write("ASTREAM=%d\nREF=%s\nREFNOTE=%s\nCHECK=%s\nCHECKNOTE=%s\n" % (chosen_a, shell_quote(ref), shell_quote(note), shell_quote(check), shell_quote(cnote)))
     print("reference: %s" % note)
+    print("check:     %s" % (cnote or "the reference's cues" if ref else cnote or "none — the coverage of the dialogue cannot be verified"))
+
+def choose_check(a, subs, audio, tcues):
+    """the check track: the given SRT, "none", else the fullest non-forced text track not in the dub's language,
+    those in the language of another audio stream (the original's) preferred -> (path or "", note)"""
+    if a.check == "none": return "", ""
+    if a.check: return a.check, os.path.basename(a.check)
+    other = [st for st in subs if st["codec"] in ("subrip", "ass", "ssa", "mov_text", "webvtt", "text")
+             and not st["forced"] and not same_lang(st["lang"], a.lang)]
+    if not other: return "", ""
+    cand = [(st, tcues.get(st["index"], [])) for st in other]; cand = [c for c in cand if len(c[1]) >= 50]
+    if not cand: return "", ""
+    orig = {st["lang"] for st in audio if not same_lang(st["lang"], a.lang)}
+    st, cs = max([c for c in cand if c[0]["lang"] in orig] or cand, key=lambda c: len(c[1]))
+    path = os.path.join(a.work, "check-auto.srt"); write_srt(path, cs)
+    return path, "track %d (%s %s%s, %d speech cues)" % (subs.index(st), st["lang"], st["codec"], (" " + st["title"]) if st["title"] else "", len(cs))
 
 def text_subtitle_cues(path, subs, work):
     """text tracks: their speech cues, with text, from one ffmpeg pass -> {stream index: [(start, end, text)]}"""
@@ -1578,6 +1863,11 @@ def cmd_run(a):
     if repairs: print("  skipped speech: %d segment(s) re-transcribed, %d repaired" % (len(repairs), sum(1 for r in repairs if r[4])), flush=True)
     merged, used, dropped = merge_passes(A, B, regions, vad, cfg, prompt, names)
     used["repairs"] = repairs
+    check = speech_cues(read_srt(a.check)) if a.check else cues
+    check_note = a.check_note or ("the reference" if cues else "")
+    if check:
+        merged, used["rescues"], dr = rescue(x, sr, merged, check, a.lang, a.model, cfg, os.path.join(a.work, "segments_rescue.json"))
+        dropped += dr; normalise_names(merged, names)
     json.dump(merged, open(os.path.join(a.work, "segments_merged.json"), "w"), ensure_ascii=False)
     if a.speakers:
         nspk = label_speakers(x, sr, merged, os.path.join(a.work, "speakers.json"), cues)
@@ -1585,10 +1875,17 @@ def cmd_run(a):
         for seg in merged:
             for w in seg["words"]: w.pop("emb", None)
     if not cues: mark_word_boundaries(merged, cfg)
-    out = assemble_by_reference(merged, cues, cfg, x, sr, a.work) if cues else build_cues(make_units(merged, cues, cfg), cues, cfg)
+    out = assemble_by_reference(merged, cues, cfg, x, sr, a.work, [(s, e, dialogue_cue(t)) for s, e, t in check], a.speakers) if cues else build_cues(make_units(merged, cues, cfg), cues, cfg)
     write_srt(a.out, [(s, e, t) for s, e, t, _, _ in out])
-    nmiss, nlow = write_report(a.report, out, vad, used, dropped, len(cues))
+    nmiss, nlow, nstill = write_report(a.report, out, vad, used, dropped, len(cues), check, check_note)
     print("written %s: %d cues; uncovered speech chunks %d; low-confidence lines %d; report %s" % (a.out, len(out), nmiss, nlow, a.report))
+    if not check: print("  check: no check track — the coverage of the dialogue is UNVERIFIED")
+    else:
+        rs = used.get("rescues", [])
+        print("  check against %s: %d of %d speech cues without a line (%.1f%%); %d recovered by transcribing their windows alone"
+              % (check_note, nstill, len(check), 100*nstill/len(check), sum(1 for r in rs if r[3])))
+        if nstill > CHECK_WARN*len(check):
+            print("  WARNING: more than %d%% of the check cues have no line — see the review" % round(100*CHECK_WARN))
 #+end_src
 **** probe
 #+begin_src python
@@ -1615,6 +1912,7 @@ def main():
     r = sub.add_parser("run", parents=[common], help="full pipeline")
     r.add_argument("--names", default=""); r.add_argument("--out", required=True); r.add_argument("--report", required=True)
     r.add_argument("--force", action="store_true"); r.add_argument("--no-speakers", dest="speakers", action="store_false")
+    r.add_argument("--check", default="", help="SRT of what must be spoken (the original's subtitles)"); r.add_argument("--check-note", dest="check_note", default="")
     p = sub.add_parser("probe", parents=[common], help="probe option values")
     p.add_argument("--what", required=True, choices=["timeline", "regions", "language", "models", "names", "all"])
     p.add_argument("--models", default="turbo,large-v3,medium"); p.add_argument("--samples", type=int, default=12)
@@ -1622,7 +1920,7 @@ def main():
     p.add_argument("--ref-note", dest="ref_note", default=""); p.add_argument("--names-spec", dest="names_spec", default=""); p.add_argument("--input", default="INPUT")
     t = sub.add_parser("tracks", help="list the container's tracks, pick audio and reference, write choice.env")
     t.add_argument("--input", required=True); t.add_argument("--lang", default="ja"); t.add_argument("--work", required=True)
-    t.add_argument("--astream", default=""); t.add_argument("--ref", default="")
+    t.add_argument("--astream", default=""); t.add_argument("--ref", default=""); t.add_argument("--check", default="")
     a = ap.parse_args()
     {"run": cmd_run, "probe": cmd_probe, "tracks": cmd_tracks}[a.cmd](a)
 
@@ -1657,6 +1955,7 @@ the input.  An empty =ASTREAM= or =REF= means "choose automatically".
 #+begin_src bash
 LANGCODE="ja"; REF=""; SHIFT="0"; NAMES=""; MODEL="large-v3"; ASTREAM=""
 OUT=""; WORK=""; FORCE=""; MKVOUT=""; PROBE=""; SAMPLES=12; MODELS="turbo,large-v3,medium"; SPEAKERS="on"
+CHECK=""; CHANNEL="auto"
 #+end_src
 *** Help
 #+begin_src bash
@@ -1708,6 +2007,15 @@ Options (default in brackets):
   -d on|off     speaker separation: two speakers inside one cue go on
                 separate lines (voice embeddings clustered over the film);
                 reliable on a scene, less so over a whole film [on]
+  -v CHECK.srt  the original's subtitles, the list of what must be spoken:
+                every speech cue of it that has no Whisper segment is
+                transcribed again on its own, and the cues still without a
+                line are listed in the review [the fullest text track inside
+                INPUT in the language of another audio stream, else the
+                reference; "-v none" for no check]
+  -c CHANNEL    auto: of a surround dub only the centre channel, where the
+                dialogue is (the effects and score stay out); center: insist
+                on it; mix: a downmix of all channels [auto]
   -M            update the input MKV in place: the SRT replaces the tool's
                 earlier SRT of LANG if there is one, else goes before the first
                 subtitle track of LANG (text before bitmap), after all subtitle
@@ -1731,7 +2039,7 @@ HELP
 *** Option parsing
 **** getopts loop
 #+begin_src bash
-while getopts "hpP:l:r:s:n:m:a:o:w:fd:MS:L:" opt
+while getopts "hpP:l:r:s:n:m:a:o:w:fd:MS:L:v:c:" opt
 do
     case $opt in
         h ) help ;;
@@ -1749,6 +2057,8 @@ do
         f ) FORCE="--force" ;;
         d ) SPEAKERS="$OPTARG" ;;
         M ) MKVOUT=1 ;;
+        v ) CHECK="$OPTARG" ;;
+        c ) CHANNEL="$OPTARG" ;;
 #+end_src
 **** Probe options
 #+begin_src bash
@@ -1777,6 +2087,15 @@ then
     echo "Error: reference SRT not found: $REF"
     exit 1
 fi
+if [ ! -z "$CHECK" ] && [ "$CHECK" != "none" ] && [ ! -f "$CHECK" ]
+then
+    echo "Error: check SRT not found: $CHECK"
+    exit 1
+fi
+case "$CHANNEL" in
+    auto|center|mix ) ;;
+    ,* ) echo "Error: -c takes auto, center or mix, not '$CHANNEL'"; exit 1 ;;
+esac
 case "$PROBE" in
     ""|streams|timeline|regions|language|models|names|all ) ;;
     ,* ) echo "Error: unknown probe '$PROBE' (-p, or -P streams|timeline|regions|language|models|names)"; exit 1 ;;
@@ -1819,7 +2138,7 @@ the automatic choice (=choice.env= is written by the Python half).
 echo "-------------------------"
 echo "Tracks of $INPUT (language $LANGCODE)"
 echo "-------------------------"
-"$PY" "$WHISPERPY" tracks --input "$INPUT" --lang "$LANGCODE" --work "$WORK" --astream "$ASTREAM" --ref "$REF"
+"$PY" "$WHISPERPY" tracks --input "$INPUT" --lang "$LANGCODE" --work "$WORK" --astream "$ASTREAM" --ref "$REF" --check "$CHECK"
 ASTREAM_AUTO=""; [ -z "$ASTREAM" ] && ASTREAM_AUTO="--astream-auto"
 . "$WORK/choice.env"
 [ "$PROBE" = "streams" ] && exit 0
@@ -1845,15 +2164,44 @@ the input, which makes it newer: the audio comes out the same and the
 transcription is kept.)  The
 padding is checked, not trusted: the WAV must reach the end of the
 stream's last packet within 1 s, else the run stops.
+
+Only the dub's centre channel is decoded when the stream has one
+(=-c auto=, the default): a film mix puts the dialogue there and the
+effects and score around it, and a downmix of all channels buries the
+voices exactly where the action is loudest — the VAD then hears no
+speech and Whisper, given the window anyway, writes its stock outro
+phrases (Mission: Impossible III, 13:50–25:30: 49 of 117 English lines
+heard by the VAD in the downmix, 67 in the centre channel; Whisper's
+no-speech probability on them fell from ≈ 0.6 to ≈ 0.35).  A centre
+channel that turns out silent (peak below -50 dB) falls back to the
+downmix; =-c mix= forces the downmix, =-c center= insists on the centre.
 #+begin_src bash
-WAV="$WORK/audio16k.wav"; STAMP="$WORK/audio16k.stamp"; STAMPV="pts0 a:$ASTREAM"
+WAV="$WORK/audio16k.wav"; STAMP="$WORK/audio16k.stamp"
+LAYOUT="$(ffprobe -v error -select_streams a:$ASTREAM -show_entries stream=channel_layout -of csv=p=0 "$INPUT" | head -1)"
+CH="mix"
+if [ "$CHANNEL" != "mix" ] && ffmpeg -hide_banner -layouts 2>/dev/null | awk -v l="$LAYOUT" '$1 == l { print $2 }' | grep -Eq '(^|\+)FC(\+|$)'
+then
+    CH="center"
+elif [ "$CHANNEL" = "center" ]
+then
+    echo "Error: -c center, but audio stream $ASTREAM (layout '${LAYOUT:-unknown}') has no centre channel"; exit 1
+fi
+STAMPV="pts0 a:$ASTREAM ch:$CHANNEL"     # the request, not the outcome: a silent centre gives the same downmix every time
 if [ ! -f "$WAV" ] || [ "$INPUT" -nt "$WAV" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$STAMPV" ]
 then
     echo "-------------------------"
-    echo "Decoding audio stream $ASTREAM of $INPUT to 16 kHz mono ..."
+    echo "Decoding audio stream $ASTREAM of $INPUT to 16 kHz mono ($([ "$CH" = center ] && echo "its centre channel, the dialogue" || echo "a downmix of all channels")) ..."
     echo "-------------------------"
     NEW="$WORK/audio16k.new.wav"
-    ffmpeg -nostdin -v error -y -copyts -i "$INPUT" -map 0:a:$ASTREAM -af aresample=async=1:first_pts=0 -ac 1 -ar 16000 -c:a pcm_s16le "$NEW"
+    PAN=""; [ "$CH" = "center" ] && PAN=",pan=mono|c0=FC"
+    ffmpeg -nostdin -v error -y -copyts -i "$INPUT" -map 0:a:$ASTREAM -af "aresample=async=1:first_pts=0$PAN" -ac 1 -ar 16000 -c:a pcm_s16le "$NEW"
+    if [ "$CH" = "center" ] && [ "$CHANNEL" = "auto" ] && \
+       awk -v p="$(ffmpeg -nostdin -hide_banner -i "$NEW" -af volumedetect -f null - 2>&1 | sed -n 's/.*max_volume: \(-*[0-9.]*\) dB.*/\1/p')" 'BEGIN { exit !(p == "" || p < -50) }'
+    then
+        echo "  the centre channel is silent: decoding the downmix instead"
+        CH="mix"
+        ffmpeg -nostdin -v error -y -copyts -i "$INPUT" -map 0:a:$ASTREAM -af aresample=async=1:first_pts=0 -ac 1 -ar 16000 -c:a pcm_s16le "$NEW"
+    fi
     TEND=$(ffprobe -v error -select_streams a:$ASTREAM -show_entries packet=pts_time,duration_time -of csv=p=0 "$INPUT" \
                | awk -F, '$1 != "N/A" { e = $1 + ($2 == "N/A" ? 0 : $2); if (e > m) m = e } END { print m }')
     TWAV=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$NEW")
@@ -1867,7 +2215,7 @@ then
     then
         rm -f "$NEW"; touch "$WAV"; echo "  same audio as before: the caches are kept"
     else
-        rm -f "$WORK"/{vad,vad_fine,regions,speakers,segments_prompt,segments_noprompt,segments_merged}.json "$WORK/speakers.json.npy"
+        rm -f "$WORK"/{vad,vad_fine,regions,speakers,segments_prompt,segments_noprompt,segments_merged,segments_rescue}.json "$WORK/speakers.json.npy"
         mv -f "$NEW" "$WAV"
     fi
     echo "$STAMPV" > "$STAMP"
@@ -1894,7 +2242,8 @@ echo "Transcribing ($MODEL, $LANGCODE) — reference $REFNOTE; work dir $WORK"
 echo "-------------------------"
 SPKOPT="--no-speakers"; [ "$SPEAKERS" = "on" ] && SPKOPT=""
 "$PY" "$WHISPERPY" run --audio "$WAV" --lang "$LANGCODE" "${REFOPT[@]}" \
-    --names "$NAMES" --model "$MODEL" --work "$WORK" --out "$OUT" --report "$REPORT" $FORCE $SPKOPT
+    --names "$NAMES" --model "$MODEL" --work "$WORK" --out "$OUT" --report "$REPORT" $FORCE $SPKOPT \
+    --check "$CHECK" --check-note "$CHECKNOTE"
 #+end_src
 *** Optional: update the MKV in place
 The new SRT becomes a subtitle track of the input itself.  Position:
