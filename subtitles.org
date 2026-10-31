@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.12.0 - description
+* subtitles - version 1.12.1 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -170,6 +170,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   dir's parent =/tmp/subtitles/models=.
 
 * Changelog
+** 1.12.1
+*** 2026-10-31_21-48-08 UTC (土曜日)
+**** -M carries the replaced SRT's track name and default flag over to the new track (Terminator 2's 日本語, default, came out nameless and not default).
 ** 1.12.0
 *** 2026-10-31_21-08-33 UTC (土曜日)
 **** One whole sentence per cue (-g sentence, the default): the reference-sized cues are regrouped at the dub's sentence ends — Whisper's punctuation, MeCab's final forms, segment edges, a turn, a silence over 2 s — keeping their text and speech-snapped edges, and wrapped into as many lines of 20 characters as the sentence needs, at bunsetsu boundaries. The 1.10.0 chaining still cut every sentence longer than two lines or 7 s, sometimes inside a word (Terminator 2, 1:58: …呼びましたが、その | 後もっと過酷な運命が…); 963 cues became 1084 sentences. -g cue keeps the old cues.
@@ -2807,7 +2810,10 @@ old = [i for i in own if d["tracks"][ids.index(i)]["codec"].startswith("SubRip")
 at = old[0] if old else (own[0] if own else (subs[-1] + 1 if subs else len(ids)))
 keep = [i for i in ids if i not in old]
 order = ["0:%d" % i for i in keep if i < at] + ["1:0"] + ["0:%d" % i for i in keep if i > at]
-print(",".join(order) + "|" + ",".join(str(i) for i in old))' "$LANGCODE")"
+prev = d["tracks"][ids.index(old[0])]["properties"] if old else {}
+print(",".join(order) + "|" + ",".join(str(i) for i in old) + "|" + ("yes" if prev.get("default_track") else "no") + "|" + (prev.get("track_name") or ""))' "$LANGCODE")"
+    OLDNAME="${ORDER#*|*|*|}"; ORDER="${ORDER%|*}"      # the replaced track's name and default flag are carried over
+    OLDDEF="${ORDER##*|}"; ORDER="${ORDER%|*}"
     EXCL="${ORDER#*|}"; ORDER="${ORDER%|*}"
     SUBOPT=(); [ ! -z "$EXCL" ] && SUBOPT=(--subtitle-tracks "!$EXCL")
 #+end_src
@@ -2818,7 +2824,7 @@ print(",".join(order) + "|" + ",".join(str(i) for i in old))' "$LANGCODE")"
     echo "Updating $INPUT in place: inserting $OUT (track order $ORDER) ..."
     echo "-------------------------"
     rm -f "$TMPMKV"
-    mkvmerge -o "$TMPMKV" "${SUBOPT[@]}" "$INPUT" --language 0:"$LANGCODE" --default-track-flag 0:no --sub-charset 0:UTF-8 "$OUT" --track-order "$ORDER" | grep -v '進行状況\|Progress' || true
+    mkvmerge -o "$TMPMKV" "${SUBOPT[@]}" "$INPUT" --language 0:"$LANGCODE" --default-track-flag 0:"$OLDDEF" ${OLDNAME:+--track-name "0:$OLDNAME"} --sub-charset 0:UTF-8 "$OUT" --track-order "$ORDER" | grep -v '進行状況\|Progress' || true
     counts() { ffprobe -v error -count_packets -select_streams "$2" -show_entries stream=nb_read_packets -of csv=p=0 "$1" | tr '\n' ' '; }
     ntracks() { mkvmerge -J "$1" | "$PY" -c 'import json,sys; print(len(json.load(sys.stdin)["tracks"]))'; }
     NEXCL=0; [ -z "$EXCL" ] || NEXCL=$(( $(echo "$EXCL" | tr -cd , | wc -c) + 1 ))     # SRTs of our own replaced
