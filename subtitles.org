@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.11.1 - description
+* subtitles - version 1.12.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -68,7 +68,16 @@ builds subtitles from the dub's own word timestamps.
    Speech the reference has no cue for is cut at pauses ≥ 0.7 s and
    sentence ends into cues of its own.  Without a reference everything
    goes that way.
-7. Checks: every speech cue of the check track that no Whisper
+   Then, by default, the cues are regrouped into one whole sentence
+   each (=-g sentence=), wrapped into as many lines as it needs.
+7. Cross-check (=-k=, Japanese): every line is read against the
+   original's subtitles — a name the original says that the line lacks
+   but sounds like (Kyle heard as 帰る), a meaning (LaBSE) or a number
+   that does not match.  Candidates are decoded again and scored by
+   Whisper against the audio; only what the audio supports replaces the
+   line.  Confirmed corrections of a person's go in a corrections file
+   (=-x=), applied before the assembly.
+8. Checks: every speech cue of the check track that no Whisper
    segment covers is transcribed again on its own window (before the
    assembly), and the check is repeated on the written cues; cues still
    without a line, VAD speech left without a line and the
@@ -161,6 +170,12 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   dir's parent =/tmp/subtitles/models=.
 
 * Changelog
+** 1.12.0
+*** 2026-10-31_21-08-33 UTC (土曜日)
+**** One whole sentence per cue (-g sentence, the default): the reference-sized cues are regrouped at the dub's sentence ends — Whisper's punctuation, MeCab's final forms, segment edges, a turn, a silence over 2 s — keeping their text and speech-snapped edges, and wrapped into as many lines of 20 characters as the sentence needs, at bunsetsu boundaries. The 1.10.0 chaining still cut every sentence longer than two lines or 7 s, sometimes inside a word (Terminator 2, 1:58: …呼びましたが、その | 後もっと過酷な運命が…); 963 cues became 1084 sentences. -g cue keeps the old cues.
+**** Cross-check against the original's subtitles (-k on, the default; Japanese): names of the original are paired with the dub's katakana by sound, and a line whose original names someone but which lacks the name has its sound-alike spans tried (Terminator: 帰る for カイル four times, 次の皿コーナー for 次のサラ・コナー); lines whose meaning (LaBSE) or numbers do not match the original are decoded again. Whisper scores every candidate against the audio by forced decoding under the film's names, and only what the audio supports is taken: on Terminator the true names gained +0.4 to +8.4, the genuine さらに and 変える lost −1.7 and −13.9. Corrections and unresolved suspects are listed in the review. The disc's English with Cyrillic look-alikes (nuсleаr) is read as Latin.
+**** Fix: a dub stream with no channel layout tag (Terminator 2's 6-channel AC-3, muxed in from another source, reads "unknown") was always downmixed — the centre channel was never found; the layout is now taken from the channel count (3, 6, 8) and the centre picked by position. The stamp records the layout, so a WAV decoded before is decoded again (its caches kept when it comes out identical).
+**** Corrections file (-x, default ~/.local/share/subtitles/fixes/<basename>.tsv): wrong<TAB>right[<TAB>H:MM:SS], replaced across Whisper's sub-word tokens before assembly — -n could not, as it rewrote each token alone and fed the prompt.
 ** 1.11.1
 *** 2026-10-18_18-47-45 UTC (日曜日)
 **** A cue whose turn cannot be the line break is two cues, no longer two lines broken by length across the turn: a sentence chained over two reference cues held three utterances of two speakers, no break at either turn left both lines within 16 characters, and the length break buried the reply inside a line with no dash (Mission: Impossible III, 33:00: まっさらで自分が育った / 大昔を思い出せるかかすかに — now まっさらで, then - 自分が育った大昔を思い出せるか / - かすかに). A break by length is left for text without a turn; each part of a cut cue is checked for two speakers on its own. Under a two-speaker cue of the original a pause-less Whisper segment edge is such a turn too (33:31: ベンジーで読めたのかああそりゃ今 / 述べたように最悪の状態ではあるが — now ベンジーで読めたのか, then ああそりゃ今述べたように / 最悪の状態ではあるが).
@@ -266,7 +281,7 @@ guided by a reference SRT whose timings are right and whose text is not.
   probe --what timeline|regions|language|models|names|all --audio A.wav [--ref REF.srt]
         [--shift S] [--lang ja] [--model M] [--models a,b,c] [--samples N] --work DIR
 """
-import argparse, bisect, json, os, re, sys, time
+import argparse, bisect, json, math, os, re, sys, time
 import numpy as np
 #+end_src
 *** Parameters
@@ -298,13 +313,13 @@ punctuation, lower case), and how a name
 list is turned into a prompt.  Unknown languages get the "_" entry.
 #+begin_src python
 LANG = {
-    "ja": dict(maxline=16, max_rate=30, spaces=False, punct_end="。！？!?", strip_end="。", sep="、", stop="。", dash="- ",
+    "ja": dict(maxline=16, sentline=20, max_rate=30, spaces=False, punct_end="。！？!?", strip_end="。", sep="、", stop="。", dash="- ",
                hallu=["ご視聴ありがとう", "チャンネル登録", "字幕", "おやすみなさい",
                       "ご覧いただ", "次回", "最後まで", "吹き替え", "登場人物", "映画の映像"],
                stock={"ありがとうございました", "ありがとうございます", "それではまた", "それでは", "またね",
                       "お疲れ様でした", "おつかれさまでした", "お疲れさまでした", "さようなら", "バイバイ"},
                name_re=r"[ァ-ヴー]{2,}"),
-    "_":  dict(maxline=42, max_rate=45, spaces=True, punct_end=".!?", strip_end="", sep=", ", stop=".", dash="- ",
+    "_":  dict(maxline=42, sentline=42, max_rate=45, spaces=True, punct_end=".!?", strip_end="", sep=", ", stop=".", dash="- ",
                hallu=["Thanks for watching", "Thank you for watching", "Subtitles by",
                       "Amara.org", "Subscribe", "Like and subscribe"],
                stock={"thank you", "thanks", "bye", "goodbye", "see you next time", "see you"},
@@ -635,6 +650,63 @@ def normalise_names(segs, names):
                 if v in s["text"]:
                     s["text"] = s["text"].replace(v, canon)
                     for w in s["words"]: w["w"] = w["w"].replace(v, canon)
+#+end_src
+**** Corrections file
+Mishearings a person has confirmed, one per line: =wrong<TAB>right=,
+optionally a third column =H:MM:SS= that limits the fix to the Whisper
+segment holding that time; =#= starts a comment.  The file lives
+outside the work dir — =/tmp/subtitles= does not survive a reboot, and
+a correction is the one thing here a person made — by default at
+=~/.local/share/subtitles/fixes/<basename>.tsv=, read when present.
+
+=-n= cannot do this: it rewrites each Whisper token on its own, and
+Whisper's Japanese tokens are sub-word pieces, so a mishearing spread
+over several of them (過|労|死) was never matched — and names also feed
+the prompt, which changes the transcription itself.  Here the
+replacement is made across tokens: it goes on the first token touched,
+which takes over the last one's end time, and the tokens between go.
+A fix that matches nothing is reported, so a typo in the file shows.
+#+begin_src python
+def read_fixes(path):
+    """-> [(wrong, right, time or None)]"""
+    out = []
+    if not path or not os.path.exists(path): return out
+    for ln in open(path, encoding="utf-8"):
+        if not ln.strip() or ln.lstrip().startswith("#"): continue
+        f = ln.rstrip("\n").split("\t")
+        if len(f) < 2 or not f[0]: continue
+        at = None
+        if len(f) > 2 and f[2].strip():
+            p = [float(v) for v in f[2].strip().split(":")]
+            at = sum(v * 60**(len(p) - 1 - i) for i, v in enumerate(p))
+        out.append((f[0], f[1], at))
+    return out
+
+def apply_fixes(segs, fixes):
+    """-> [((wrong, right, time), times applied)]"""
+    done = []
+    for wrong, right, at in fixes:
+        n = 0
+        for s in segs:
+            if at is not None and not (s["start"] - 1 <= at <= s["end"] + 1): continue
+            k0, here = 0, 0
+            while True:
+                ws = s["words"]; joined = "".join(w["w"] for w in ws)
+                k = joined.find(wrong, k0)
+                if k < 0: break
+                pos = 0; first = last = None; fo = lo = 0
+                for i, w in enumerate(ws):
+                    a, b = pos, pos + len(w["w"])
+                    if first is None and b > k: first, fo = i, a
+                    if a < k + len(wrong): last, lo = i, a
+                    pos = b
+                head, tail = ws[first]["w"][:k - fo], ws[last]["w"][k + len(wrong) - lo:]
+                ws[first]["w"] = head + right + tail; ws[first]["end"] = ws[last]["end"]
+                del ws[first + 1:last + 1]
+                k0 = k + len(right); here += 1
+            if here: s["text"] = "".join(w["w"] for w in s["words"]); n += here
+        done.append(((wrong, right, at), n))
+    return done
 #+end_src
 *** Speakers
 **** Phrases
@@ -1416,6 +1488,357 @@ def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None, check=(),
             if b["end"] - b["start"] < 0.5: b["end"] = b["start"] + 0.5
     return [(c["start"], c["end"], c["text"], c["logprob"], c["multi"]) for c in out]
 #+end_src
+*** Whole sentences, one per cue
+=-g sentence=, the default.  The assembly above still answers to the
+reference: it chains cues only while the chain fits two lines and
+=MAX_DUR=, and cuts a longer sentence where it must — so a long line of
+the dub came out in pieces, sometimes inside a word (Terminator 2,
+1:58: …呼びましたが、その | 後もっと過酷な運命が…).  For study, and for
+shiroikuma-jisho's player, which stops after every cue, a cue must be
+one whole sentence.
+
+So the cues the assembly wrote are regrouped.  Their text and their
+speech-snapped edges are kept; only where a cue ends changes.  The
+cues' characters are aligned with Whisper's words (=SequenceMatcher=,
+=autojunk= off), and a sentence ends after a character whose word
+closes a sentence — punctuation, a final form or final particle from
+MeCab (=se=), or the end of a Whisper segment — at the end of a line of
+two speakers (a turn), at the cue's own =?= or =!=, and wherever two
+cues are more than =SENT_GAP= apart.  A sentence that begins or ends
+where a cue did keeps that edge; one that ends inside a cue takes its
+last word's end plus =SENT_TAIL=, clamped to the cue.  A cue is then as
+many lines of =sentline= characters as the sentence needs, broken at
+MeCab bunsetsu boundaries, after punctuation first.  =-g cue= keeps
+the reference-sized cues.
+#+begin_src python
+SENT_GAP, SENT_TAIL = 2.0, 0.25
+
+def whole_sentences(out, segs, cfg):
+    """assembled cues (start, end, text, logprob, multi) -> [dict(start, end, text, logprob)], text unwrapped"""
+    sep = " " if cfg["spaces"] else ""; dash = cfg["dash"]; pend = cfg["punct_end"]
+    C, cue_of, hard = [], [], []
+    for ci, (a, z, text, lp, _) in enumerate(out):
+        lines = text.split("\n"); turn = sum(1 for l in lines if l.startswith(dash)) >= 2
+        for li, line in enumerate(lines):
+            line = line[len(dash):] if line.startswith(dash) else line
+            if li and not turn and sep and C and C[-1] != " ": C.append(" "); cue_of.append(ci); hard.append(False)
+            for ch in line: C.append(ch); cue_of.append(ci); hard.append(False)
+            if turn and li < len(lines) - 1 and hard: hard[-1] = True
+        if sep and ci + 1 < len(out): C.append(" "); cue_of.append(ci); hard.append(False)
+    W, wtime, wend = [], [], []
+    for s in sorted(segs, key=lambda s: s["start"]):
+        ws = [w for w in s["words"] if w["w"].strip()]
+        for k, w in enumerate(ws):
+            t = w["w"].strip() + sep
+            for ch in t: W.append(ch); wtime.append((w["start"], w["end"])); wend.append(False)
+            if w.get("se") or k == len(ws) - 1 or re.search("[" + re.escape(pend) + "]$", w["w"].strip()):
+                wend[-1 - len(sep)] = True
+    import difflib
+    cmap = [None] * len(C)
+    for i, j, n in difflib.SequenceMatcher(None, C, W, autojunk=False).get_matching_blocks():
+        for k in range(n): cmap[i + k] = j + k
+    def ends_after(i):
+        if i + 1 < len(C) and cue_of[i + 1] == cue_of[i] and C[i + 1] in pend + "…、，,ー〜」』":
+            return False
+        if hard[i] or C[i] in pend: return True
+        j = cmap[i]
+        return j is not None and (wend[j] or (j + 1 < len(W) and W[j + 1] in pend))
+    cue_first, cue_last = {}, {}
+    for k, ci in enumerate(cue_of): cue_first.setdefault(ci, k); cue_last[ci] = k
+    groups, cur = [], []
+    for i in range(len(C)):
+        cur.append(i)
+        last = i == len(C) - 1
+        gap = not last and cue_of[i + 1] != cue_of[i] and out[cue_of[i + 1]][0] - out[cue_of[i]][1] > SENT_GAP
+        if last or gap or ends_after(i): groups.append(cur); cur = []
+    res = []
+    for g in groups:
+        text = "".join(C[i] for i in g).strip()
+        if cfg["strip_end"]: text = text.rstrip(cfg["strip_end"])
+        if not re.search(r"\w", text): continue
+        f, l = g[0], g[-1]; fc, lc = cue_of[f], cue_of[l]
+        starts = not "".join(C[k] for k in range(cue_first[fc], f)).strip()
+        ends = not "".join(C[k] for k in range(l + 1, cue_last[lc] + 1)).strip()
+        a = out[fc][0] if starts or cmap[f] is None else min(max(wtime[cmap[f]][0], out[fc][0]), out[fc][1])
+        z = out[lc][1] if ends or cmap[l] is None else min(max(wtime[cmap[l]][1] + SENT_TAIL, out[lc][0]), out[lc][1])
+        cues_in = range(fc, lc + 1)
+        lp = sum(out[c][3] for c in cues_in) / len(cues_in)
+        res.append(dict(start=a, end=z, text=text, logprob=lp))
+    for k in range(1, len(res)):
+        p, c = res[k - 1], res[k]
+        if c["start"] < p["end"] + GAP:
+            p["end"] = max(p["start"] + 0.3, min(p["end"], c["start"] - GAP)); c["start"] = max(c["start"], p["end"] + GAP)
+        if c["end"] - c["start"] < 0.5: c["end"] = c["start"] + 0.5
+    return res
+
+def wrap_lines(t, cfg):
+    """a whole sentence -> lines of at most sentline characters, as balanced as the boundaries allow"""
+    n = cfg["sentline"]
+    if len(t) <= n: return t
+    if cfg["spaces"]:
+        cand = {m.end(): (0 if re.search(r"[,.;:!?]\s$", t[:m.end()]) else 1) for m in re.finditer(r"\s+", t)}
+    else:
+        jb = ja_boundaries(t) or {}
+        cand = {k: (0 if t[k-1] in "、，,!?！？…" else (1 if b < 0 else 2)) for k, b in jb.items() if 0 < k < len(t)}
+        for k in range(1, len(t)):
+            if t[k-1] in "、，,!?！？" and k not in cand: cand[k] = 0
+    lines = math.ceil(len(t) / n); fin = []
+    while lines <= 8:
+        best = {0: (0.0, [])}
+        for _ in range(lines - 1):
+            nb = {}
+            for p, (c, path) in best.items():
+                for q, pen in cand.items():
+                    if q <= p or q - p > n: continue
+                    cost = c + (q - p - len(t) / lines) ** 2 + 6 * pen
+                    if q not in nb or cost < nb[q][0]: nb[q] = (cost, path + [q])
+            best = nb
+        fin = [(c + (len(t) - p - len(t) / lines) ** 2, path) for p, (c, path) in best.items() if len(t) - p <= n]
+        if fin: break
+        lines += 1
+    if not fin: return "\n".join(t[k:k + n] for k in range(0, len(t), n))
+    e = [0] + min(fin)[1] + [len(t)]
+    return "\n".join(t[a:b].strip() for a, b in zip(e, e[1:]))
+#+end_src
+*** Cross-check against the original's subtitles
+Whisper writes what a word sounds like, and a dub is full of words that
+sound like other words: Terminator, 1:26–1:31, Sarah calls カイル and the
+track read 帰る four times; 25:43 次のサラ・コナー came out 次の皿コーナー;
+Terminator 2, 1:54, 核の炎で — "the nuclear fire" — came out 過労死で.
+Each is plain nonsense next to the original's line, and each sounds
+almost exactly like the right one.  So the original's subtitles — the
+check track, English on these discs — are read for what the line says,
+and the audio decides every correction.  Japanese only (readings come
+from MeCab); for other languages the stage is skipped.
+
+1. *Names.*  Proper nouns of the original — capitalised away from a
+   sentence start, at least twice, never in lower case — are paired with
+   the dub's katakana words heard under the same lines, when the two
+   sound alike (consonant skeletons, r = l, vowels dropped: Kyle =
+   カイル = k-r).  The dub's own spelling is learnt from the lines
+   Whisper got right.
+2. *A missing name.*  When the original's line names someone and the
+   Japanese line lacks that name, every span of one to three MeCab
+   words is read in kana and compared with the name; a span that sounds
+   like it (帰る カエル for カイル, 皿 サラ for サラ) is a candidate.
+3. *Meaning.*  LaBSE, a cross-language sentence embedding, scores each
+   line against the original's lines under it.  A dub paraphrases, so a
+   low score only makes the line a suspect; so does a number of two or
+   more digits in the original that the line lacks.
+4. *Candidates from the audio.*  A suspect's window is decoded again,
+   with the film's names as the prompt and without, and a reading near
+   enough to the line (no neighbour's speech pulled in) is a candidate.
+5. *The audio decides.*  Every candidate and the current line are scored
+   by forced decoding: Whisper's log-probability of exactly that text for
+   exactly that audio, with the names as context — the same prior for
+   both, so the film's names are not penalised for being foreign.  A
+   name span is taken when it scores at least =XC_NAME_MARGIN= against
+   the current text; a re-decoded line only when it scores better by
+   =XC_MARGIN= *and* says more of what the original says (the name, the
+   number, or a LaBSE score higher by =XC_SIM_GAIN=).
+
+Everything taken is listed in the review, before and after, with the
+scores; suspects nothing resolved are listed apart, with the original's
+line, for a person to listen to — and a confirmed fix goes into the
+corrections file.  Results are cached per line in the work dir.
+#+begin_src python
+XC_SIM, XC_SIM_GAIN = 0.30, 0.05      # LaBSE: below this a line is suspect; a re-decoded line must gain this much
+XC_NAME_SIM = 0.67                    # skeleton similarity of a span's reading to a name
+XC_NAME_MARGIN, XC_MARGIN = 0.0, 0.5  # forced-decoding log-probability: name span vs current, re-decoded line vs current
+HOMOGLYPH = str.maketrans("АВЕКМНОРСТХаеорсухіјѕԁԛԝ", "ABEKMHOPCTXaeopcyxijsdqw")
+NOT_NAMES = {"I", "Mom", "Dad", "God", "Mr", "Mrs", "Ms", "Dr", "OK", "Okay", "Sir", "Ma'am", "Hey", "Oh", "Yes", "No",
+             "Jesus", "Christ", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"}
+
+def unhomoglyph(t):
+    """a disc's English with Cyrillic look-alikes inside Latin words (nuсleаr) -> plain Latin"""
+    return re.sub(r"\w+", lambda m: m.group().translate(HOMOGLYPH) if re.search("[A-Za-z]", m.group()) else m.group(), t)
+
+KANA = {}
+for row in ("アイウエオ a i u e o", "カキクケコ ka ki ku ke ko", "サシスセソ sa shi su se so", "タチツテト ta chi tsu te to",
+            "ナニヌネノ na ni nu ne no", "ハヒフヘホ ha hi fu he ho", "マミムメモ ma mi mu me mo", "ヤユヨ ya yu yo",
+            "ラリルレロ ra ri ru re ro", "ワヲン wa o n", "ガギグゲゴ ga gi gu ge go", "ザジズゼゾ za ji zu ze zo",
+            "ダヂヅデド da ji zu de do", "バビブベボ ba bi bu be bo", "パピプペポ pa pi pu pe po", "ァィゥェォ a i u e o",
+            "ャュョ ya yu yo", "ヴ vu"):
+    ks, *rs = row.split()
+    for k, r in zip(ks, rs): KANA[k] = r
+
+def kata(t): return "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in t)
+
+def skeleton(t):
+    """a word's consonant skeleton, katakana or Latin: Kyle = カイル = kr, Sarah = サラ = sr, Connor = コナー = kn"""
+    if re.search("[ァ-ヴ]", t):
+        t = "".join(KANA.get(c, "") for c in kata(t))
+    t = t.lower()
+    for a, b in (("sh", "s"), ("ch", "c"), ("ts", "t"), ("ph", "f"), ("ck", "k"), ("qu", "k"), ("x", "ks"), ("th", "s")):
+        t = t.replace(a, b)
+    t = re.sub(r"c(?=[eiy])", "s", t).replace("c", "k").replace("q", "k").replace("l", "r").replace("v", "b").replace("j", "z")
+    t = re.sub(r"[^a-z]", "", t); t = re.sub(r"[aeiouyhw]", "", t)
+    return re.sub(r"(.)\1+", r"\1", t)
+
+def sound_sim(a, b):
+    import difflib
+    sa, sb = skeleton(a), skeleton(b)
+    return difflib.SequenceMatcher(None, sa, sb).ratio() if sa and sb else 0.0
+
+def english_names(check):
+    caps, lower = {}, set()
+    for _, _, t in check:
+        t = unhomoglyph(re.sub(r"<[^>]+>", "", t))
+        for m in re.finditer(r"[A-Za-z][a-z']+", t):
+            w = m.group().removesuffix("'s"); before = t[:m.start()].rstrip()
+            if "'" in w: continue                                       # I'm, I'll, Don't: never a name (I'm read as ママ)
+            if w[0].islower(): lower.add(w.lower()); continue
+            if before and before[-1] not in ".!?-:\"" and not before.endswith("\n"): caps[w] = caps.get(w, 0) + 1
+    return {w for w, n in caps.items() if n >= 2 and w.lower() not in lower and w not in NOT_NAMES and len(w) >= 3}
+
+KATA_RE = r"[ァ-ヴ][ァ-ヴー]+"
+
+def english_under(cue, check, before=1.0, after=0.5):
+    return [unhomoglyph(re.sub(r"<[^>]+>", "", t)).replace("\n", " ") for s, e, t in check
+            if e > cue["start"] - before and s < cue["end"] + after]
+
+def name_map(cues, check, names):
+    """{English name: the dub's katakana for it}, learnt from the lines that carry both"""
+    out = {}
+    for nm in names:
+        co, seen = {}, 0
+        for c in cues:
+            if not any(re.search(r"\b%s\b" % nm, e) for e in english_under(c, check)): continue
+            seen += 1
+            for k in set(re.findall(KATA_RE, c["text"].replace("・", " "))): co[k] = co.get(k, 0) + 1
+        best = [(n, k) for k, n in co.items() if n >= 2 and sound_sim(nm, k) >= 0.6]
+        if best: out[nm] = max(best)[1]
+    return out
+
+def name_spans(text, k):
+    """-> [(similarity, surface)] spans of one to three MeCab words that sound like the katakana k"""
+    tg = tagger()
+    if tg is None: return []
+    toks = [(w.surface, kata(w.feature.kana if getattr(w.feature, "kana", None) not in (None, "*") else w.surface)) for w in tg(text)]
+    out = []
+    for i in range(len(toks)):
+        for j in range(i + 1, min(len(toks), i + 3) + 1):
+            surf = "".join(s for s, _ in toks[i:j]); rd = "".join(r for _, r in toks[i:j])
+            if k in surf or not re.search(r"\w", surf) or abs(len(rd) - len(k)) > 2: continue
+            sim = sound_sim(rd, k)
+            if sim >= XC_NAME_SIM: out.append((sim, -len(surf), surf))
+    return [(sim, surf) for sim, _, surf in sorted(out, reverse=True)[:3]]
+
+KANJI_NUM = dict(zip("〇一二三四五六七八九", range(10)))
+def numbers_ja(t):
+    t = t.translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+    out = {int(m) for m in re.findall(r"\d+", t.replace(",", ""))}
+    for run in re.findall(r"[〇一二三四五六七八九十百千万]+", t):
+        total, sect, cur = 0, 0, 0
+        for ch in run:
+            if ch in KANJI_NUM: cur = cur * 10 + KANJI_NUM[ch] if cur else KANJI_NUM[ch]
+            elif ch == "万": total += (sect + cur or 1) * 10000; sect = cur = 0
+            else: sect += (cur or 1) * {"十": 10, "百": 100, "千": 1000}[ch]; cur = 0
+        out.add(total + sect + cur)
+        if all(ch in KANJI_NUM for ch in run): out.add(int("".join(str(KANJI_NUM[c]) for c in run)))
+    return out
+
+def numbers_en(t): return {int(m) for m in re.findall(r"\b\d{2,}\b", t.replace(",", ""))}
+
+class Scorer:
+    """forced decoding: log-probability of a given text for an audio window, after a prompt"""
+    def __init__(self, model, x, sr, lang, prompt):
+        import whisper
+        self.model, self.x, self.sr, self.whisper = model, x, sr, whisper
+        self.tok = whisper.tokenizer.get_tokenizer(True, num_languages=model.num_languages, language=lang, task="transcribe")
+        self.pre = ([self.tok.sot_prev] + self.tok.encode(" " + prompt) if prompt else []) + list(self.tok.sot_sequence_including_notimestamps)
+        self.lang, self.prompt = lang, prompt
+    def mel(self, a, b):
+        seg = self.x[int(max(0, a - 0.2) * self.sr):int((b + 0.2) * self.sr)]
+        return self.whisper.log_mel_spectrogram(self.whisper.pad_or_trim(seg), n_mels=self.model.dims.n_mels).to("cuda")
+    def score(self, a, b, texts):
+        import torch
+        with torch.no_grad():
+            feat = self.model.embed_audio(self.mel(a, b)[None])
+            res = []
+            for t in texts:
+                seq = self.pre + self.tok.encode(t) + [self.tok.eot]
+                lg = self.model.logits(torch.tensor([seq], device="cuda"), feat)[0].float().log_softmax(-1)
+                res.append(sum(lg[i, seq[i + 1]].item() for i in range(len(self.pre) - 1, len(seq) - 1)))
+        return res
+    def decode(self, a, b, prompt):
+        r = self.model.transcribe(self.x[int(max(0, a - 0.2) * self.sr):int((b + 0.2) * self.sr)], language=self.lang,
+                                  initial_prompt=prompt, condition_on_previous_text=False, fp16=True, beam_size=5, best_of=5)
+        return r["text"].strip()
+
+def bare(t, cfg):
+    t = re.sub(r"[、。，．,.!?！？…\s]" if not cfg["spaces"] else r"[,.!?…]", "", t)
+    return t.strip()
+
+def cross_check(sents, check, x, sr, cfg, lang, model_name, cache_path, given_names=()):
+    """correct sents in place; -> dict(names, fixes, suspects)"""
+    rep = dict(names={}, fixes=[], suspects=[])
+    if lang != "ja" or not check or tagger() is None: return rep
+    import difflib
+    cache = json.load(open(cache_path)) if os.path.exists(cache_path) else {}
+    names = name_map(sents, check, english_names(check)); rep["names"] = names
+    prompt = "、".join(list(dict.fromkeys(list(names.values()) + list(given_names)))) + "。" if (names or given_names) else None
+    print("  cross-check: %d names of the original paired with the dub's (%s)"
+          % (len(names), ", ".join("%s=%s" % kv for kv in sorted(names.items()))), flush=True)
+    from sentence_transformers import SentenceTransformer
+    emb = SentenceTransformer("sentence-transformers/LaBSE", device="cuda")
+    ens = [" ".join(english_under(c, check)) for c in sents]
+    def sims(jas, en):
+        if not en.strip(): return [1.0] * len(jas)
+        v = emb.encode(jas + [en], normalize_embeddings=True); return [float(v[k] @ v[-1]) for k in range(len(jas))]
+    base = [sims([c["text"]], e)[0] for c, e in zip(sents, ens)]
+    todo = []
+    for i, c in enumerate(sents):
+        en = ens[i]; why = []
+        missing = [k for nm, k in names.items() if re.search(r"\b%s\b" % nm, en) and k not in c["text"]]
+        spans = [(k, sp) for k in missing for sp in name_spans(c["text"], k)]
+        if missing: why.append("name " + "/".join(missing))
+        if numbers_en(en) - numbers_ja(c["text"]): why.append("number " + "/".join(str(v) for v in sorted(numbers_en(en) - numbers_ja(c["text"]))))
+        if en.strip() and base[i] < XC_SIM: why.append("meaning %.2f" % base[i])
+        if why: todo.append((i, why, missing, spans))
+    model = load_model(model_name) if todo else None
+    sc = Scorer(model, x, sr, lang, prompt) if model else None
+    prog = Progress("cross-check line", len(todo)) if todo else None
+    for n_, (i, why, missing, spans) in enumerate(todo):
+        c = sents[i]; key = "%.2f-%.2f|%s" % (c["start"], c["end"], c["text"])
+        if key not in cache:
+            cands = []
+            for k, (sim, surf) in spans:
+                cands.append(("name", c["text"].replace(surf, k, 1)))
+            for p in ((prompt, None) if "\n" not in c["text"] else ()):
+                t = sc.decode(c["start"], c["end"], p).rstrip(cfg["strip_end"])
+                if t and t != c["text"] and difflib.SequenceMatcher(None, bare(t, cfg), bare(c["text"], cfg)).ratio() >= 0.4 \
+                        and 0.6 <= len(bare(t, cfg)) / max(1, len(bare(c["text"], cfg))) <= 1.6:
+                    cands.append(("decode", t))
+            cands = list(dict.fromkeys(cands))
+            lps = sc.score(c["start"], c["end"], [bare(c["text"], cfg)] + [bare(t, cfg) for _, t in cands])
+            cache[key] = dict(cur=lps[0], cands=[[kind, t, lp] for (kind, t), lp in zip(cands, lps[1:])])
+        r = cache[key]; best = None
+        for kind, t, lp in r["cands"]:
+            gain = lp - r["cur"]
+            if kind == "name":
+                ok = gain >= XC_NAME_MARGIN
+            else:
+                better = any(k in t for k in missing) or (numbers_en(ens[i]) & (numbers_ja(t) - numbers_ja(c["text"]))) \
+                         or sims([t], ens[i])[0] >= base[i] + XC_SIM_GAIN
+                ok = gain >= XC_MARGIN and bool(better)
+            if ok and (best is None or lp > best[2]): best = (kind, t, lp)
+        if best:
+            rep["fixes"].append((c["start"], c["end"], c["text"], best[1], best[0], best[2] - r["cur"], ", ".join(why), ens[i]))
+            c["text"] = best[1]
+        else:
+            rep["suspects"].append((c["start"], c["end"], c["text"], ", ".join(why), ens[i],
+                                    [(t, lp - r["cur"]) for _, t, lp in r["cands"]]))
+        prog.step(n_ + 1, "%d corrected" % len(rep["fixes"]))
+        if n_ % 20 == 0: json.dump(cache, open(cache_path, "w"), ensure_ascii=False)
+    if prog: prog.done()
+    json.dump(cache, open(cache_path, "w"), ensure_ascii=False)
+    if model is not None: unload_model(model)
+    del emb
+    print("  cross-check: %d suspect lines, %d corrected by the audio, %d left for review"
+          % (len(todo), len(rep["fixes"]), len(rep["suspects"])), flush=True)
+    return rep
+#+end_src
 *** Verification against the original's subtitles
 The VAD is not to be trusted with the dialogue of an action scene:
 under gunfire, rotors and score it hears nothing, and without a
@@ -1492,6 +1915,8 @@ def write_report(path, cues, vad, used, dropped, ref_count, check=(), check_note
         f.write("subtitles: %d cues written (reference had %d), %d two-line at a turn or sentence end\n" % (len(cues), ref_count, sum(1 for c in cues if c[4])))
         if check: f.write("check against %s: %d of %d speech cues without a line (%.1f%%)%s\n" % (check_note, len(still), len(check), 100*len(still)/len(check), "  <- MORE THAN %d%%: SEE BELOW" % round(100*CHECK_WARN) if len(still) > CHECK_WARN*len(check) else ""))
         else: f.write("check: no check track, the coverage of the dialogue is unverified\n")
+        xc = used.get("crosscheck")
+        if xc is not None: f.write("cross-check against the original: %d lines corrected by the audio, %d suspects left to listen to\n" % (len(xc["fixes"]), len(xc["suspects"])))
         f.write("regions from the prompted pass: %d, from the unprompted pass: %d\n" % (used["prompt"], used["noprompt"]))
         f.write("VAD speech >= 0.8 s without a subtitle: %d chunks, %.1f min\n\n" % (len(miss), sum(e-s for s, e in miss)/60))
         for s, e in miss: f.write("   %s - %s (%.1f s)\n" % (hms(s), hms(e), e-s))
@@ -1504,6 +1929,19 @@ def write_report(path, cues, vad, used, dropped, ref_count, check=(), check_note
         for s, e, t, lp, _ in low: f.write("%s --> %s  (%.2f)  %s\n" % (fmt_time(s), fmt_time(e), lp, t.replace("\n", " / ")))
         f.write("\nTwo-line cues at a turn or sentence end inside one reference cue: %d\n\n" % len(multi))
         for s, e, t, lp, _ in multi: f.write("%s --> %s  %s\n" % (fmt_time(s), fmt_time(e), t.replace("\n", " / ")))
+        fx = used.get("fixes", [])
+        if fx:
+            f.write("\nCorrections file: %d entries\n\n" % len(fx))
+            for (w, r, at), n in fx: f.write("   %-3s  %s -> %s%s\n" % (n or "NONE", w, r, "  at " + hms(at) if at is not None else ""))
+        if xc is not None:
+            f.write("\nCross-check, names of the original and the dub's spelling: %s\n" % (", ".join("%s=%s" % kv for kv in sorted(xc["names"].items())) or "none found"))
+            f.write("\nCross-check, lines corrected (the audio scored the new text at least as well; Δ = log-probability gain): %d\n\n" % len(xc["fixes"]))
+            for s, e, old, new, kind, gain, why, en in xc["fixes"]:
+                f.write("%s --> %s  [%s, Δ %+.2f, %s]\n    %s\n => %s\n    EN: %s\n" % (fmt_time(s), fmt_time(e), kind, gain, why, old, new, en))
+            f.write("\nCross-check, suspects the audio did not resolve (listen; a confirmed fix goes into the corrections file): %d\n\n" % len(xc["suspects"]))
+            for s, e, t, why, en, cands in xc["suspects"]:
+                f.write("%s --> %s  [%s]\n    %s\n    EN: %s\n" % (fmt_time(s), fmt_time(e), why, t, en))
+                for ct, g in cands: f.write("    ?  %s  (Δ %+.2f)\n" % (ct, g))
         reps = used.get("repairs", [])
         f.write("\nSegments where Whisper skipped speech, re-transcribed: %d (repaired %d)\n\n" % (len(reps), sum(1 for r in reps if r[4])))
         for s, e, old, new, ok in reps: f.write("%s --> %s  [%s]  %s  =>  %s\n" % (fmt_time(s), fmt_time(e), "repaired" if ok else "kept", old, new))
@@ -1895,6 +2333,11 @@ def cmd_run(a):
     if check:
         merged, used["rescues"], dr = rescue(x, sr, merged, check, a.lang, a.model, cfg, os.path.join(a.work, "segments_rescue.json"))
         dropped += dr; normalise_names(merged, names)
+    fixes = read_fixes(a.fixes)
+    used["fixes"] = apply_fixes(merged, fixes) if fixes else []
+    if fixes:
+        print("  corrections file %s: %d entries, %d applied, %d matched nothing"
+              % (a.fixes, len(fixes), sum(n for _, n in used["fixes"]), sum(1 for _, n in used["fixes"] if not n)), flush=True)
     json.dump(merged, open(os.path.join(a.work, "segments_merged.json"), "w"), ensure_ascii=False)
     if a.speakers:
         nspk = label_speakers(x, sr, merged, os.path.join(a.work, "speakers.json"), cues)
@@ -1903,6 +2346,14 @@ def cmd_run(a):
             for w in seg["words"]: w.pop("emb", None)
     if not cues: mark_word_boundaries(merged, cfg)
     out = assemble_by_reference(merged, cues, cfg, x, sr, a.work, [(s, e, dialogue_cue(t)) for s, e, t in check], a.speakers) if cues else build_cues(make_units(merged, cues, cfg), cues, cfg)
+    if a.group == "sentence":
+        sents = whole_sentences(out, merged, cfg)
+        print("  whole sentences: %d cues -> %d sentences" % (len(out), len(sents)), flush=True)
+    else:
+        sents = [dict(start=s, end=e, text=t, logprob=lp, multi=m) for s, e, t, lp, m in out]
+    used["crosscheck"] = cross_check(sents, check, x, sr, cfg, a.lang, a.model, os.path.join(a.work, "crosscheck.json"), list(names)) \
+        if a.crosscheck and check else None
+    out = [(c["start"], c["end"], wrap_lines(c["text"], cfg) if a.group == "sentence" else c["text"], c["logprob"], c.get("multi", False)) for c in sents]
     write_srt(a.out, [(s, e, t) for s, e, t, _, _ in out])
     nmiss, nlow, nstill = write_report(a.report, out, vad, used, dropped, len(cues), check, check_note)
     print("written %s: %d cues; uncovered speech chunks %d; low-confidence lines %d; report %s" % (a.out, len(out), nmiss, nlow, a.report))
@@ -1940,6 +2391,9 @@ def main():
     r.add_argument("--names", default=""); r.add_argument("--out", required=True); r.add_argument("--report", required=True)
     r.add_argument("--force", action="store_true"); r.add_argument("--no-speakers", dest="speakers", action="store_false")
     r.add_argument("--check", default="", help="SRT of what must be spoken (the original's subtitles)"); r.add_argument("--check-note", dest="check_note", default="")
+    r.add_argument("--group", choices=["sentence", "cue"], default="sentence", help="one whole sentence per cue, or the reference's cue sizes")
+    r.add_argument("--fixes", default="", help="corrections file: wrong<TAB>right[<TAB>H:MM:SS] per line")
+    r.add_argument("--no-crosscheck", dest="crosscheck", action="store_false", help="skip the cross-check against the original's subtitles")
     p = sub.add_parser("probe", parents=[common], help="probe option values")
     p.add_argument("--what", required=True, choices=["timeline", "regions", "language", "models", "names", "all"])
     p.add_argument("--models", default="turbo,large-v3,medium"); p.add_argument("--samples", type=int, default=12)
@@ -1982,7 +2436,7 @@ the input.  An empty =ASTREAM= or =REF= means "choose automatically".
 #+begin_src bash
 LANGCODE="ja"; REF=""; SHIFT="0"; NAMES=""; MODEL="large-v3"; ASTREAM=""
 OUT=""; WORK=""; FORCE=""; MKVOUT=""; PROBE=""; SAMPLES=12; MODELS="turbo,large-v3,medium"; SPEAKERS="on"
-CHECK=""; CHANNEL="auto"
+CHECK=""; CHANNEL="auto"; GROUP="sentence"; FIXES=""; XCHECK="on"
 #+end_src
 *** Help
 #+begin_src bash
@@ -2050,6 +2504,23 @@ Options (default in brackets):
                 (track list, packet counts) before it replaces the file; the
                 SRT and the review file then move into the work dir, so
                 nothing is left beside the movie [no]
+  -g sentence|cue
+                sentence: every cue is one whole sentence, as many lines as
+                it needs (for study, and for a player that stops after each
+                cue); cue: cues sized like the reference's, two lines at
+                most, a long sentence cut [sentence]
+  -x FIXES      corrections file, one confirmed mishearing per line:
+                wrong<TAB>right, optionally <TAB>H:MM:SS to limit it to the
+                line spoken then; replaced across Whisper's sub-word tokens
+                before the subtitles are built
+                [~/.local/share/subtitles/fixes/INPUT-basename.tsv, if present]
+  -k on|off     cross-check every line against the original's subtitles
+                (Japanese): names the original says but the line lacks, read
+                as something that sounds like them (Kyle heard as 帰る); lines
+                whose meaning (LaBSE) or numbers do not match; candidates are
+                decoded again and Whisper scores each against the audio, and
+                only what the audio supports is taken — the rest is listed in
+                the review [on]
   -S N          sample regions used by the probes [12]
   -L MODELS     models tried by the models probe [turbo,large-v3,medium]
 
@@ -2066,7 +2537,7 @@ HELP
 *** Option parsing
 **** getopts loop
 #+begin_src bash
-while getopts "hpP:l:r:s:n:m:a:o:w:fd:MS:L:v:c:" opt
+while getopts "hpP:l:r:s:n:m:a:o:w:fd:MS:L:v:c:g:x:k:" opt
 do
     case $opt in
         h ) help ;;
@@ -2086,6 +2557,9 @@ do
         M ) MKVOUT=1 ;;
         v ) CHECK="$OPTARG" ;;
         c ) CHANNEL="$OPTARG" ;;
+        g ) GROUP="$OPTARG" ;;
+        x ) FIXES="$OPTARG" ;;
+        k ) XCHECK="$OPTARG" ;;
 #+end_src
 **** Probe options
 #+begin_src bash
@@ -2123,6 +2597,19 @@ case "$CHANNEL" in
     auto|center|mix ) ;;
     ,* ) echo "Error: -c takes auto, center or mix, not '$CHANNEL'"; exit 1 ;;
 esac
+case "$GROUP" in
+    sentence|cue ) ;;
+    ,* ) echo "Error: -g takes sentence or cue, not '$GROUP'"; exit 1 ;;
+esac
+case "$XCHECK" in
+    on|off ) ;;
+    ,* ) echo "Error: -k takes on or off, not '$XCHECK'"; exit 1 ;;
+esac
+if [ ! -z "$FIXES" ] && [ ! -f "$FIXES" ]
+then
+    echo "Error: corrections file not found: $FIXES"
+    exit 1
+fi
 case "$PROBE" in
     ""|streams|timeline|regions|language|models|names|all ) ;;
     ,* ) echo "Error: unknown probe '$PROBE' (-p, or -P streams|timeline|regions|language|models|names)"; exit 1 ;;
@@ -2131,6 +2618,7 @@ BASE="$(basename "$INPUT")"; BASE="${BASE%.*}"
 DIR="$(cd "$(dirname "$INPUT")" && pwd)"
 [ -z "$OUT" ] && OUT="$DIR/$BASE.$LANGCODE.srt"
 [ -z "$WORK" ] && WORK="/tmp/subtitles/$BASE"
+[ -z "$FIXES" ] && FIXES="${XDG_DATA_HOME:-$HOME/.local/share}/subtitles/fixes/$BASE.tsv"
 REPORT="${OUT%.srt}_review.txt"
 mkdir -p "$WORK"
 #+end_src
@@ -2145,12 +2633,17 @@ then
     echo "Creating the Whisper venv at $VENV ..."
     echo "-------------------------"
     python3 -m venv --system-site-packages "$VENV"
-    "$VENV/bin/pip" install -q openai-whisper silero-vad speechbrain fugashi unidic-lite scipy
+    "$VENV/bin/pip" install -q openai-whisper silero-vad speechbrain fugashi unidic-lite scipy sentence-transformers
+fi
+if ! "$VENV/bin/python" -c "import sentence_transformers" 2>/dev/null
+then
+    echo "Adding sentence-transformers (LaBSE, for the cross-check) to $VENV ..."
+    "$VENV/bin/pip" install -q sentence-transformers
 fi
 if ! "$VENV/bin/python" -c "import torch, whisper, silero_vad, speechbrain, fugashi; assert torch.cuda.is_available()" 2>/dev/null
 then
     echo "Error: $VENV lacks whisper/silero_vad/speechbrain/fugashi or CUDA is unavailable; recreate it:"
-    echo "  python3 -m venv --system-site-packages $VENV && $VENV/bin/pip install openai-whisper silero-vad speechbrain fugashi unidic-lite scipy"
+    echo "  python3 -m venv --system-site-packages $VENV && $VENV/bin/pip install openai-whisper silero-vad speechbrain fugashi unidic-lite scipy sentence-transformers"
     exit 1
 fi
 PY="$VENV/bin/python"
@@ -2205,7 +2698,19 @@ downmix; =-c mix= forces the downmix, =-c center= insists on the centre.
 #+begin_src bash
 WAV="$WORK/audio16k.wav"; STAMP="$WORK/audio16k.stamp"
 LAYOUT="$(ffprobe -v error -select_streams a:$ASTREAM -show_entries stream=channel_layout -of csv=p=0 "$INPUT" | head -1)"
-CH="mix"
+CH="mix"; FCSEL="FC"
+if [ -z "$LAYOUT" ] || [ "$LAYOUT" = "unknown" ]
+then
+    # an untagged stream (a dub muxed in from another source: Terminator 2's 6-channel AC-3 reads "unknown");
+    # the decoder's order for 3, 6 and 8 channels puts the centre third
+    NCH="$(ffprobe -v error -select_streams a:$ASTREAM -show_entries stream=channels -of csv=p=0 "$INPUT" | head -1)"
+    case "$NCH" in
+        3 ) LAYOUT="3.0" ;;
+        6 ) LAYOUT="5.1(side)" ;;
+        8 ) LAYOUT="7.1" ;;
+    esac
+    case "$LAYOUT" in 3.0|"5.1(side)"|7.1 ) FCSEL="c2" ;; esac
+fi
 if [ "$CHANNEL" != "mix" ] && ffmpeg -hide_banner -layouts 2>/dev/null | awk -v l="$LAYOUT" '$1 == l { print $2 }' | grep -Eq '(^|\+)FC(\+|$)'
 then
     CH="center"
@@ -2213,14 +2718,14 @@ elif [ "$CHANNEL" = "center" ]
 then
     echo "Error: -c center, but audio stream $ASTREAM (layout '${LAYOUT:-unknown}') has no centre channel"; exit 1
 fi
-STAMPV="pts0 a:$ASTREAM ch:$CHANNEL"     # the request, not the outcome: a silent centre gives the same downmix every time
+STAMPV="pts0 a:$ASTREAM ch:$CHANNEL lay:$LAYOUT"     # the request, not the outcome: a silent centre gives the same downmix every time
 if [ ! -f "$WAV" ] || [ "$INPUT" -nt "$WAV" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$STAMPV" ]
 then
     echo "-------------------------"
     echo "Decoding audio stream $ASTREAM of $INPUT to 16 kHz mono ($([ "$CH" = center ] && echo "its centre channel, the dialogue" || echo "a downmix of all channels")) ..."
     echo "-------------------------"
     NEW="$WORK/audio16k.new.wav"
-    PAN=""; [ "$CH" = "center" ] && PAN=",pan=mono|c0=FC"
+    PAN=""; [ "$CH" = "center" ] && PAN=",pan=mono|c0=$FCSEL"
     ffmpeg -nostdin -v error -y -copyts -i "$INPUT" -map 0:a:$ASTREAM -af "aresample=async=1:first_pts=0$PAN" -ac 1 -ar 16000 -c:a pcm_s16le "$NEW"
     if [ "$CH" = "center" ] && [ "$CHANNEL" = "auto" ] && \
        awk -v p="$(ffmpeg -nostdin -hide_banner -i "$NEW" -af volumedetect -f null - 2>&1 | sed -n 's/.*max_volume: \(-*[0-9.]*\) dB.*/\1/p')" 'BEGIN { exit !(p == "" || p < -50) }'
@@ -2268,9 +2773,10 @@ echo "-------------------------"
 echo "Transcribing ($MODEL, $LANGCODE) — reference $REFNOTE; work dir $WORK"
 echo "-------------------------"
 SPKOPT="--no-speakers"; [ "$SPEAKERS" = "on" ] && SPKOPT=""
+XCOPT="--no-crosscheck"; [ "$XCHECK" = "on" ] && XCOPT=""
 "$PY" "$WHISPERPY" run --audio "$WAV" --lang "$LANGCODE" "${REFOPT[@]}" \
     --names "$NAMES" --model "$MODEL" --work "$WORK" --out "$OUT" --report "$REPORT" $FORCE $SPKOPT \
-    --check "$CHECK" --check-note "$CHECKNOTE"
+    --check "$CHECK" --check-note "$CHECKNOTE" --group "$GROUP" --fixes "$FIXES" $XCOPT
 #+end_src
 *** Optional: update the MKV in place
 The new SRT becomes a subtitle track of the input itself.  Position:
