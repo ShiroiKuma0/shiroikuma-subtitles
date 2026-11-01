@@ -7,14 +7,14 @@ tags and 8 more in their filenames — the rest said nothing the reader did not
 already know.  The directory name, by contrast, is reliable: 白い熊 names every
 book `Book, Author -- [tags] (year)`.
 
-So the rule is: trust the folder for book, author, year and language; take the
+So the rule is: trust the directory for book, author, year and language; take the
 track title from the tag when it says something, from the filename when it does
 not, and leave it unset rather than write a restatement.
 
 What counts as a restatement is deliberately narrow.  Chapter markers —
 `Kapitel 1`, `Глава 1`, `第1章`, `Vorrede` — are kept, because that is how the
 author divided the book and it names a real part of it.  Only strings that
-repeat the book, the author or the folder are dropped.
+repeat the book, the author or the directory are dropped.
 """
 
 from __future__ import annotations
@@ -188,7 +188,7 @@ def before_tags(name: Optional[str]) -> str:
     Everything after the separator is 白い熊's own tagging — bracket codes, the
     year, and genre words written in Japanese (「小説」, 「哲学」,
     「ルポルタージュ」).  Those last are why the whole name cannot be used: a
-    German book's folder ends in kanji.  Everything *before* it is the book's
+    German book's directory ends in kanji.  Everything *before* it is the book's
     own title and author, and is exactly what identifies the language.
     """
     if not name:
@@ -318,12 +318,12 @@ class BookInfo:
         return ISO3.get(self.language or '')
 
     def with_language(self, language: Optional[str]) -> 'BookInfo':
-        """A copy carrying *language* when the folder name did not supply one.
+        """A copy carrying *language* when the directory name did not supply one.
 
         MP4 stores language in a mandatory field, so a file with none reads
         `und` — there is no way to leave it out.  The fix is therefore not to
         omit the tag but to know the language: the EPUB states it, `-l` states
-        it, and only a bare folder of audio leaves it genuinely unknown.
+        it, and only a bare directory of audio leaves it genuinely unknown.
         """
         if self.language or not language:
             return self
@@ -419,7 +419,7 @@ def clean_track_title(raw: Optional[str], info: BookInfo,
     """Return ``(title, None)`` to keep it, or ``(None, reason)`` to discard.
 
     Kept: anything naming a part of the work, including bare chapter markers.
-    Discarded: only restatements of the book, the author or the folder, plus
+    Discarded: only restatements of the book, the author or the directory, plus
     naked track numbers and publisher ids.
     """
     if not raw:
@@ -447,7 +447,7 @@ def clean_track_title(raw: Optional[str], info: BookInfo,
 
     for label, ref in (('the book title', info.book), ('the book title', album),
                        ('the author name', info.author),
-                       ('the folder name', info.directory)):
+                       ('the directory name', info.directory)):
         if not ref:
             continue
         reference = _norm(ref)

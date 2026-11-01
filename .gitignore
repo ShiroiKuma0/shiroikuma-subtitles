@@ -11,3 +11,6 @@ dist/
 # scratch belongs in .scratch/, never the repo root.
 :memory:.ses
 /gpu.py
+
+# Emacs backup of the literate source.
+/subtitles.org~

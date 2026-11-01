@@ -47,7 +47,7 @@ DEFAULT_PORT = 50021
 
 #: Where the engine is looked for, in order, before falling back to extraction.
 ENGINE_PATHS = [
-    "~/.cache/jisho-subs/vv-engine/run",
+    "~/.cache/subtitles/vv-engine/run",
     "~/voicevox/vv-engine/run",
     "~/.local/share/voicevox/vv-engine/run",
     "/opt/voicevox/vv-engine/run",
@@ -149,7 +149,7 @@ def ensure_engine(explicit: Optional[str] = None, cache_dir: Optional[str] = Non
             "no VOICEVOX engine found.  Install VOICEVOX (its AppImage is enough — "
             "put it at ~/voicevox/VOICEVOX.AppImage), or point --tts-engine at an "
             "unpacked vv-engine directory.")
-    cache = cache_dir or os.path.expanduser("~/.cache/jisho-subs")
+    cache = cache_dir or os.path.expanduser("~/.cache/subtitles")
     return extract_engine(app, os.path.join(cache, "vv-engine"), log=log)
 
 
@@ -382,7 +382,7 @@ class EngineProcess:
         self.use_gpu = use_gpu
         self.threads = threads
         self.data_home = data_home or os.path.expanduser(
-            "~/.cache/jisho-subs/voicevox-data")
+            "~/.cache/subtitles/voicevox-data")
         self.startup = startup
         self.log = log or (lambda *a: None)
         self.port = free_port()
@@ -504,7 +504,7 @@ def running_engine(engine_path: Optional[str] = None, url: Optional[str] = None,
         raise EngineError(f"nothing answering at {url}")
 
     run = ensure_engine(engine_path, cache_dir=cache_dir, log=log)
-    data_home = os.path.join(cache_dir or os.path.expanduser("~/.cache/jisho-subs"),
+    data_home = os.path.join(cache_dir or os.path.expanduser("~/.cache/subtitles"),
                              "voicevox-data")
 
     process = EngineProcess(run, use_gpu=bool(use_gpu), threads=threads,

@@ -105,7 +105,7 @@ def prefer_seekable(paths: List[str], on_shadow=None) -> List[str]:
     """Where a track exists twice, keep the seek-accurate copy.
 
     Converted books hold `001 Track.mp3` and `001 Track.m4b` side by side in one
-    folder.  Both are the same audio, so processing both would double every
+    directory.  Both are the same audio, so processing both would double every
     chapter; the M4B is the one the app can seek, so it wins and the MP3 is
     shadowed.
     """

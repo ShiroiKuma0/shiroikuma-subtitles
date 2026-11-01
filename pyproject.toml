@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jisho-subs"
-version = "0.1.0"
-description = "Sentence-aligned SRTs from an EPUB and its audiobook, for shiroikuma-jisho"
+name = "shiroikuma-subtitles"
+version = "2.0.0"
+description = "Subtitles for shiroikuma-jisho: sentence-aligned SRTs from an EPUB and its audiobook, and transcribed SRTs from a film's dub"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -21,17 +21,24 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# CTranslate2 loads these by soname at runtime; jisho_subs.cuda puts them on
+# CTranslate2 loads these by soname at runtime; shiroikuma_subtitles.cuda puts them on
 # LD_LIBRARY_PATH.  Normally they arrive as torch dependencies — this package
 # does not use torch, so it asks for them directly.
 cuda = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12"]
 # The German voice.  Japanese talks to VOICEVOX over HTTP and needs no package;
 # Piper is a library, so it is only a dependency for the languages that use it.
 piper = ["piper-tts>=1.7"]
+# The films (`subtitles mkv`): its Python half lives in subtitles.org and is
+# carried inside the script, but runs in this virtualenv.  openai-whisper, not
+# faster-whisper, because the cross-check scores a given text by the model's
+# own logits.  torch must be a CUDA 13 build (the RTX 5090 is sm_120):
+# `subtitles -s` installs with PyTorch's cu130 index as an extra index.
+mkv = ["torch", "openai-whisper", "silero-vad", "speechbrain", "fugashi",
+       "unidic-lite", "scipy", "sentence-transformers"]
 dev = ["pytest>=7.4"]
 
 [project.scripts]
-jisho-subs = "jisho_subs.cli:main"
+shiroikuma-subtitles = "shiroikuma_subtitles.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["jisho_subs*"]
+include = ["shiroikuma_subtitles*"]

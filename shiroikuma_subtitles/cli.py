@@ -33,7 +33,7 @@ def _colour_enabled() -> bool:
 
 
 def log(msg: str = "") -> None:
-    print(f"{C.TAG}[jisho-subs]{C.RESET} {msg}", file=sys.stderr)
+    print(f"{C.TAG}[subtitles]{C.RESET} {msg}", file=sys.stderr)
 
 
 class Steps:
@@ -48,16 +48,16 @@ class Steps:
         # the progress that matters, and "step 1 of 1" only competes with it.
         counter = (f"{C.DIM}step {self.n} of {self.total}{C.RESET}  "
                    if self.total > 1 else "")
-        print(f"\n{C.TAG}[jisho-subs]{C.RESET} {counter}{C.HEAD}{msg}{C.RESET}",
+        print(f"\n{C.TAG}[subtitles]{C.RESET} {counter}{C.HEAD}{msg}{C.RESET}",
               file=sys.stderr)
 
 
 def step(msg: str) -> None:
-    print(f"\n{C.TAG}[jisho-subs]{C.RESET} {C.HEAD}{msg}{C.RESET}", file=sys.stderr)
+    print(f"\n{C.TAG}[subtitles]{C.RESET} {C.HEAD}{msg}{C.RESET}", file=sys.stderr)
 
 
 def die(msg: str, code: int = 1):
-    print(f"{C.TAG}[jisho-subs]{C.RESET} {C.ERR}error:{C.RESET} {msg}",
+    print(f"{C.TAG}[subtitles]{C.RESET} {C.ERR}error:{C.RESET} {msg}",
           file=sys.stderr)
     raise SystemExit(code)
 
@@ -65,7 +65,7 @@ def die(msg: str, code: int = 1):
 # -- input resolution ----------------------------------------------------
 
 #: How the tool is invoked, for error messages that name a command to run.
-PROG = "shiroikuma-jisho-subtitles"
+PROG = "subtitles epub"
 
 
 def _looks_like_a_book_file(path) -> bool:
@@ -164,7 +164,7 @@ def _confirm_delete(count: int, where: str, assume_yes: bool,
     if assume_yes:
         log(f"{C.DIM}-y given, proceeding without asking{C.RESET}")
         return True
-    print(f"{C.TAG}[jisho-subs]{C.RESET} {C.TAG}Delete them?{C.RESET} [y/N] ",
+    print(f"{C.TAG}[subtitles]{C.RESET} {C.TAG}Delete them?{C.RESET} [y/N] ",
           file=sys.stderr, end="", flush=True)
     try:
         answer = input().strip().lower()
@@ -279,7 +279,7 @@ def _report_tags(result) -> None:
         mark = C.OK if "losslessly" in method else C.WARN
         log(f"  {mark}{n} file(s) {method}{C.RESET}")
     log("")
-    log(f"  {C.HEAD}tags written from the folder name{C.RESET}")
+    log(f"  {C.HEAD}tags written from the directory name{C.RESET}")
     for label, value in (("album", info.book), ("artist", info.author),
                          ("composer", info.narrator), ("date", info.year),
                          ("language", info.iso3)):
@@ -324,14 +324,14 @@ def _resolve_language(args, source: str) -> str:
             f"from the book's metadata")
         return normalise_lang(declared)
 
-    # Failing that, the folder's own bracket code — [107] German, [942] Polish
+    # Failing that, the directory's own bracket code — [107] German, [942] Polish
     # and so on.  Only a few directories carry one, but it costs nothing to look.
     from .metadata import parse_directory
     if args.directory:
         info = parse_directory(os.path.abspath(args.directory))
         if info.language:
             log(f"language not given; using {C.HEAD}{info.language}{C.RESET} "
-                f"from the folder's [{[c for c in info.codes if c in __import__('jisho_subs.metadata', fromlist=['x']).LANGUAGE_CODES][0]}] code")
+                f"from the directory's [{[c for c in info.codes if c in __import__('shiroikuma_subtitles.metadata', fromlist=['x']).LANGUAGE_CODES][0]}] code")
             return normalise_lang(info.language)
     die("could not determine the language; pass -l/--lang")
 
@@ -548,7 +548,7 @@ def cmd_convert(args) -> int:
                 f"{C.HEAD}--force re-tags them in place{C.RESET}")
             from .convert import retag
             bar = Progress(len(files), "re-tagging",
-                           tag=f"{C.TAG}[jisho-subs]{C.RESET} ")
+                           tag=f"{C.TAG}[subtitles]{C.RESET} ")
             result = retag(files, positions=_book_numbering(files, []),
                            jobs=args.jobs,
                            language=getattr(args, "lang", None),
@@ -581,7 +581,7 @@ def cmd_convert(args) -> int:
         return 0
     log(f"converting {len(stale)} files → {out_dir}")
     bar = Progress(len(stale), "converting",
-                   tag=f"{C.TAG}[jisho-subs]{C.RESET} ", rate_unit="MB/s")
+                   tag=f"{C.TAG}[subtitles]{C.RESET} ", rate_unit="MB/s")
     result = convert(stale, out_dir, jobs=args.jobs, force=args.force,
                      reencode=args.reencode,
                      positions=_book_numbering(files, stale),
@@ -633,9 +633,9 @@ def cmd_lint(args) -> int:
 
 
 def _reference_from_srt(plan, log_fn) -> list:
-    """Use the folder's existing cues as the reference text.
+    """Use the directory's existing cues as the reference text.
 
-    A folder of MP3s with subtitles has everything needed except a book: the
+    A directory of MP3s with subtitles has everything needed except a book: the
     cues *are* the sentences. Feeding them in where an EPUB's sentences would go
     means the same alignment re-places them against the converted audio, which
     is a genuine resync rather than a constant offset — and it repairs an SRT
@@ -679,7 +679,7 @@ def _language_for(args, plan, files):
     guess = detect_language(info, [f.name for f in sample],
                             [read_tags(f.path) for f in sample])
     if guess:
-        log(f"  language not stated; {C.HEAD}{guess}{C.RESET} from the folder "
+        log(f"  language not stated; {C.HEAD}{guess}{C.RESET} from the directory "
             f"and file names")
         return normalise_lang(guess)
     die("could not determine the language; pass -l/--lang")
@@ -727,7 +727,7 @@ def _resync_from_srt(args, plan, files) -> bool:
 
     if args.refine:
         used = len({c.file_index for c in cues})
-        vbar = Progress(used, "snapping", tag=f"{C.TAG}[jisho-subs]{C.RESET} ")
+        vbar = Progress(used, "snapping", tag=f"{C.TAG}[subtitles]{C.RESET} ")
 
         def on_file(phase, audio):
             if phase == "done":
@@ -742,7 +742,7 @@ def _resync_from_srt(args, plan, files) -> bool:
     if args.dry_run:
         log(f"  {C.WARN}dry run — nothing written{C.RESET}")
         return True
-    wbar = Progress(len(files), "writing", tag=f"{C.TAG}[jisho-subs]{C.RESET} ")
+    wbar = Progress(len(files), "writing", tag=f"{C.TAG}[subtitles]{C.RESET} ")
     stats = write_for_files(cues, files, args.out,
                             log=lambda m: wbar.note(m.strip()),
                             on_file=lambda name: wbar.advance(name))
@@ -769,7 +769,7 @@ def _run_one_book(args, plan) -> bool:
     files = discover(plan.directory, on_shadow=shadowed.extend)
     args._shadowed = shadowed
     if not files:
-        # This used to return False and print nothing at all, so a folder
+        # This used to return False and print nothing at all, so a directory
         # holding only an EPUB exited 1 in silence — which is the very case
         # --tts exists for.
         source = getattr(plan, "source", None) or find_source(plan.directory)
@@ -802,7 +802,7 @@ def _run_one_book(args, plan) -> bool:
             die("ffmpeg is needed to convert MP3 to M4B; pass --keep-mp3 to skip")
         out_dir = args.convert_to or target_dir(stale)
         cbar = Progress(len(stale), "converting",
-                        tag=f"{C.TAG}[jisho-subs]{C.RESET} ", rate_unit="MB/s")
+                        tag=f"{C.TAG}[subtitles]{C.RESET} ", rate_unit="MB/s")
         result = convert(stale, out_dir, jobs=args.jobs, force=args.force,
                          reencode=args.reencode, language=lang,
                          positions=_book_numbering(files, stale),
@@ -853,7 +853,7 @@ def _run_one_book(args, plan) -> bool:
         log(f"  priming Whisper with {len(names)} names: "
             f"{C.DIM}{prompt[:70]}…{C.RESET}")
     cache_dir = args.cache_dir or default_cache_dir()
-    bar = Progress(len(files), "transcribing", tag=f"{C.TAG}[jisho-subs]{C.RESET} ")
+    bar = Progress(len(files), "transcribing", tag=f"{C.TAG}[subtitles]{C.RESET} ")
     tr = Transcriber(model_name=args.model, device=args.device,
                      batch_size=args.batch_size, beam_size=args.beam_size,
                      cache_dir=cache_dir, initial_prompt=prompt,
@@ -870,7 +870,7 @@ def _run_one_book(args, plan) -> bool:
 
     step("aligning")
     with Spinner("aligning the reference against the audio",
-                 tag=f"{C.TAG}[jisho-subs]{C.RESET} "):
+                 tag=f"{C.TAG}[subtitles]{C.RESET} "):
         cues, stats = align(sentences, transcripts, lang, log=lambda m: log(m))
     if not stats.placed:
         log(f"  {C.ERR}nothing matched — skipping this book{C.RESET}")
@@ -882,7 +882,7 @@ def _run_one_book(args, plan) -> bool:
         step("snapping cue ends into the narrator's pauses")
         from .refine import refine
         used = len({c.file_index for c in cues if c is not None})
-        vbar = Progress(used, "snapping", tag=f"{C.TAG}[jisho-subs]{C.RESET} ")
+        vbar = Progress(used, "snapping", tag=f"{C.TAG}[subtitles]{C.RESET} ")
 
         def on_file(phase, audio):
             if phase == "done":
@@ -898,7 +898,7 @@ def _run_one_book(args, plan) -> bool:
         log(f"  {C.WARN}dry run — nothing written{C.RESET}")
         write_stats = WriteStats()
     else:
-        wbar = Progress(len(files), "writing", tag=f"{C.TAG}[jisho-subs]{C.RESET} ")
+        wbar = Progress(len(files), "writing", tag=f"{C.TAG}[subtitles]{C.RESET} ")
         write_stats = write_for_files(
             cues, files, args.out,
             log=lambda m: (log(m) if args.verbose else wbar.note(m.strip())),
@@ -962,7 +962,7 @@ def cmd_run(args) -> int:
                 "To read it aloud — one M4B and one SRT per chapter, no",
                 "audiobook needed:",
                 f"  {PROG} --tts --epub {shlex.quote(root)} -o OUTDIR",
-                "To align it to a recording you already have, pass the folder",
+                "To align it to a recording you already have, pass the directory",
                 "holding both:",
                 f"  {PROG} BOOKDIR",
                 f"{PROG} -h tts explains the first one."]))
@@ -1001,7 +1001,7 @@ def cmd_run(args) -> int:
             f"nothing was touched{C.RESET}")
         return 0
     if not args.yes:
-        print(f"{C.TAG}[jisho-subs]{C.RESET} {C.TAG}Proceed?{C.RESET} [y/N] ",
+        print(f"{C.TAG}[subtitles]{C.RESET} {C.TAG}Proceed?{C.RESET} [y/N] ",
               file=sys.stderr, end="", flush=True)
         try:
             answer = input().strip().lower()
@@ -1042,14 +1042,14 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 The full manual, including what -d deletes and what protects you from it,
-is in the wrapper:  shiroikuma-jisho-subtitles -h
+is in the script:  subtitles epub -h
 
 examples:
-  shiroikuma-jisho-subtitles ~/books/Lazar          # one book
-  shiroikuma-jisho-subtitles ~/audiobooks -n        # a library: show the plan
-  shiroikuma-jisho-subtitles ~/audiobooks -d        # ...and delete the MP3s
-  shiroikuma-jisho-subtitles -c ~/books/Lazar       # convert the audio only
-  shiroikuma-jisho-subtitles --lint ~/books/Lazar   # check the written SRTs
+  subtitles epub ~/books/Lazar          # one book
+  subtitles epub ~/audiobooks -n        # a library: show the plan
+  subtitles epub ~/audiobooks -d        # ...and delete the MP3s
+  subtitles epub -c ~/books/Lazar       # convert the audio only
+  subtitles epub --lint ~/books/Lazar   # check the written SRTs
 """)
     p.add_argument("paths", nargs="*", metavar="PATH",
                    help="a book directory, a directory of them, or (with "
@@ -1102,7 +1102,7 @@ examples:
 
     subs = p.add_argument_group("subtitles")
     subs.add_argument("--realign", action="store_true",
-                      help="when a folder has SRTs but no book, transcribe and "
+                      help="when a directory has SRTs but no book, transcribe and "
                            "align them again rather than shifting them onto the "
                            "converted audio")
     subs.add_argument("--no-refine", dest="refine", action="store_false",

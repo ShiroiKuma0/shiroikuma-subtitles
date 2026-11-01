@@ -241,7 +241,7 @@ def lint(path: str) -> List[str]:
 def read_cues(path: str) -> List[str]:
     """The cue texts of an SRT, in order, with markup already stripped.
 
-    Used when a folder has subtitles but no book: the existing cues become the
+    Used when a directory has subtitles but no book: the existing cues become the
     reference text, so the same alignment that places an EPUB's sentences can
     re-place these against the converted audio.
     """

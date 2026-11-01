@@ -21,17 +21,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bs4 import BeautifulSoup
 
-from jisho_subs import ruby as ruby_mod
-from jisho_subs import tts as tts_mod
-from jisho_subs.ruby import Ruby
-from jisho_subs.segment import Sentence, segment
-from jisho_subs.source import Block, _blocks_from_html
+from shiroikuma_subtitles import ruby as ruby_mod
+from shiroikuma_subtitles import tts as tts_mod
+from shiroikuma_subtitles.ruby import Ruby
+from shiroikuma_subtitles.segment import Sentence, segment
+from shiroikuma_subtitles.source import Block, _blocks_from_html
 
 
 # -- offsets survive whitespace collapse ---------------------------------
 
 def test_clean_with_offsets_matches_the_cleaner_it_mirrors():
-    from jisho_subs.source import _clean
+    from shiroikuma_subtitles.source import _clean
 
     for raw in ["  Am  Rand ", "　日本語　の　文章　", "a\n\nb", "", "   ",
                 "私は　猫である"]:
@@ -619,7 +619,7 @@ def test_the_childs_cpu_is_read_through_a_parenthesised_name(tmp_path):
     import subprocess
     import time
 
-    from jisho_subs import voicevox as vv
+    from shiroikuma_subtitles import voicevox as vv
 
     if not os.path.isdir("/proc/self"):
         pytest.skip("no /proc on this system")
@@ -696,7 +696,7 @@ def test_speed_shortens_the_estimate():
 def test_a_transport_hiccup_is_retried_not_fatal(monkeypatch):
     """A dropped connection mid-book must not end the book."""
     import urllib.error
-    from jisho_subs import voicevox
+    from shiroikuma_subtitles import voicevox
 
     calls = {"n": 0}
 
@@ -725,7 +725,7 @@ def test_a_transport_hiccup_is_retried_not_fatal(monkeypatch):
 
 def test_a_request_that_never_succeeds_raises_rather_than_blocking(monkeypatch):
     import urllib.error
-    from jisho_subs import voicevox
+    from shiroikuma_subtitles import voicevox
 
     def dead(req, timeout=None):
         raise urllib.error.URLError("nothing there")
@@ -741,7 +741,7 @@ def test_an_http_error_is_not_retried():
     """A 500 is the engine's considered answer — retrying it just wastes time.
     This is how the GPU probe learns the GPU cannot synthesise."""
     import urllib.error
-    from jisho_subs import voicevox
+    from shiroikuma_subtitles import voicevox
     import io as _io
 
     calls = {"n": 0}
@@ -761,7 +761,7 @@ def test_an_http_error_is_not_retried():
 
 def test_the_client_has_a_finite_timeout_by_default():
     """The hang happened with a client that waited indefinitely in practice."""
-    from jisho_subs import voicevox
+    from shiroikuma_subtitles import voicevox
     eng = voicevox.Engine()
     assert 0 < eng.timeout <= 300
     assert eng.retries >= 2

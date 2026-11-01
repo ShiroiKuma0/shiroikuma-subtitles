@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 import sys
 
-_GUARD = "JISHO_SUBS_CUDA_REEXEC"
+_GUARD = "SUBTITLES_CUDA_REEXEC"
 
 
 def _library_dirs() -> list[str]:
@@ -57,4 +57,4 @@ def ensure_library_path() -> None:
     env = dict(os.environ)
     env[_GUARD] = "1"
     env["LD_LIBRARY_PATH"] = os.pathsep.join(missing + ([current] if current else []))
-    os.execve(sys.executable, [sys.executable, "-m", "jisho_subs"] + sys.argv[1:], env)
+    os.execve(sys.executable, [sys.executable, "-m", "shiroikuma_subtitles"] + sys.argv[1:], env)

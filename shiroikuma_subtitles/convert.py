@@ -62,7 +62,7 @@ def needs_conversion(files: Sequence[AudioFile]) -> List[AudioFile]:
 
 
 def target_dir(files: Sequence[AudioFile]) -> str:
-    """The audio's own directory — one folder per book, as 白い熊 keeps them.
+    """The audio's own directory — one directory per book, as 白い熊 keeps them.
 
     The M4B lands beside the MP3 it came from, sharing its basename, so the
     same SRT pairs with either.  The MP3 is left in place; removing it is 白い熊's
@@ -206,7 +206,7 @@ def convert(files: Sequence[AudioFile], out_dir: Optional[str] = None,
     out_dir = out_dir or target_dir(todo)
     os.makedirs(out_dir, exist_ok=True)
 
-    # The folder name is the reliable source for book, author, year and
+    # The directory name is the reliable source for book, author, year and
     # language; the per-file tags are not.
     info = parse_directory(os.path.dirname(os.path.abspath(todo[0].path))) \
         .with_language(language)

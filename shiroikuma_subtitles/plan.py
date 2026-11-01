@@ -1,7 +1,7 @@
 """Working out what a directory is, and what should be done to it.
 
-白い熊's library holds three kinds of folder side by side: a book with its EPUB,
-a folder of MP3s with subtitles already made for them, and a folder of MP3s with
+白い熊's library holds three kinds of directory side by side: a book with its EPUB,
+a directory of MP3s with subtitles already made for them, and a directory of MP3s with
 nothing else. Pointed at the library root, the tool has to tell them apart on its
 own — asking for a mode flag on a 127-book run is asking for the wrong flag.
 
@@ -75,9 +75,9 @@ def _has_audio(directory: str) -> bool:
 def classify(root: str) -> str:
     """``book``, ``library`` or ``empty``.
 
-    A folder holding a book file, or audio of its own, is a book.  A folder
+    A directory holding a book file, or audio of its own, is a book.  A directory
     whose *children* hold audio is a library.  One child alone is still read as
-    a book, since that is what a book directory with its audio in a subfolder
+    a book, since that is what a book directory with its audio in a subdirectory
     looks like.
     """
     if find_source(root) or _has_audio(root):

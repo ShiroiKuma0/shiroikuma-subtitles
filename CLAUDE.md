@@ -1,8 +1,57 @@
-# shiroikuma-jisho-subtitles — working notes
+# shiroikuma-subtitles — working notes
 
-Produces one-sentence-per-cue SRTs from an EPUB plus its audiobook, for the
-sister app **shiroikuma-jisho** (`~/git/shiroikuma-jisho`). Pure Python CLI, no
-Android side.
+Subtitles for the sister app **shiroikuma-jisho** (`~/git/shiroikuma-jisho`),
+which speaks one cue and stops. One command, `subtitles`, with subcommands:
+
+- `subtitles epub` — one-sentence-per-cue SRTs from an EPUB plus its audiobook,
+  or the book read aloud (`--tts`). The Python package `shiroikuma_subtitles`;
+  everything below "Films" in this file is about it.
+- `subtitles mkv` — a film's dubbed soundtrack transcribed with Whisper, timed
+  by the original's subtitles. Entirely in `subtitles.org`.
+- `subtitles lint`, and `subtitles -s` to set up or check the machine.
+
+## The script is literate, and stands on its own
+
+**`subtitles.org` is the source of `~/0/bin/subtitles` — never hand-edit the
+tangled file**; the next tangle overwrites it. The tangled result is not in git
+and is not symlinked: git holds the source, the tangle is the install.
+
+- In Emacs: `C-c C-v C-t`; the `Local Variables` block also tangles on save.
+- Batch: `emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-babel-tangle-file "subtitles.org"))'`
+
+Everything under `* Source files` tangles into the one file, in document
+order. The exception is `mkv`'s Python half: its subtree carries `:tangle no
+:noweb-ref mkv-python :noweb-sep "\n\n"`, and the single block of
+`mkv_whisper_py()` (`:noweb yes`) pulls it in as a quoted here-document. The
+separator matters — without it the blocks join with no blank line between
+them. `mkv_main` is a **subshell** function, `mkv_main() ( … )`, so the driver's
+getopts, variables and `exit` stay inside it. At run time it writes the Python
+into the film's work dir as `subtitles-whisper.py` and runs it there.
+
+The script needs the virtualenv `~/venv.shiroikuma-subtitles`, never the
+checkout: `subtitles -s` installs the package editable from `SUBTITLES_REPO`
+(default `~/git/shiroikuma-subtitles`) when it exists, from GitHub otherwise,
+with the extras `cuda,mkv,piper,dev`. torch comes from PyTorch's cu130 index
+— the RTX 5090 is sm_120. Both Whisper engines live in that one venv:
+faster-whisper (CTranslate2) for books, openai-whisper on torch for films,
+because the cross-check scores a given text by the model's own logits.
+
+In the Org file a line starting with `*` or `#+` inside a source block is
+written with a leading `,` (Org's escape), indented or not; it tangles back.
+
+## Films (`subtitles mkv`)
+
+- Bump the version in the top headline and prepend a `** x.y.z` / `*** <UTC
+  stamp> (曜日)` / `**** entry` block to `* Changelog` for user-facing changes.
+- Tunables live in the `Parameters` block of the Python half. Add a language
+  by adding a `LANG[...]` entry.
+- The work dir `/tmp/subtitles/<basename>` caches the VAD and both Whisper
+  passes, so the subtitle-building parameters can be re-tuned without
+  re-transcribing (`-f` forces a fresh transcription).
+- Corrections a person confirmed live in
+  `~/.local/share/subtitles/fixes/<basename>.tsv`, outside the work dir.
+- The reference SRT and the audio must be on the same timeline — verify the
+  first cue against the first spoken line before a long run.
 
 ## Things that are load-bearing — do not "simplify" them
 
@@ -26,7 +75,7 @@ book — so it needs no metadata and works in any language.
 loads: it drops empty cues, merges cues sharing a timestamp, merges adjacent
 cues with identical text less than 500 ms apart, and drops the final cue when
 `last.end < secondLast.start`. Read the rules table in the module docstring
-before changing the writer, and run `jisho-subs lint` after.
+before changing the writer, and run `subtitles lint` after.
 
 **`ß → ss`** in `normalize.py`. Not cosmetic: it is the difference between 85 %
 and 94 % on «Also sprach Zarathustra», whose EPUB mixes 1883 word forms with
@@ -54,7 +103,7 @@ why the test covers a fragment-then-pause case and not just "start is in
 silence".
 
 **Track numbers must count the book, not the batch.** `convert()` takes a
-`positions` map built from every track in the folder; without it, converting one
+`positions` map built from every track in the directory; without it, converting one
 leftover file of twenty-two tags it `1/1`. Tags already written cannot be
 revised without re-converting, so a book done in two runs carries two different
 totals — `_check_track_numbering()` reports that rather than leaving it to be
@@ -72,7 +121,7 @@ covered by a test that decodes both and compares, not by assertion.
 wrong sentence boundaries" — so precisely-aligned cues are wasted on MP3. The
 ffmpeg invocation in `convert.py` is copied from that dialog verbatim; keep the
 two in step if the app changes it. Conversion writes the M4B **beside its MP3**, same
-basename, and never touches the original — so one folder ends up holding both
+basename, and never touches the original — so one directory ends up holding both
 copies of every track. `audio.prefer_seekable()` is what stops the tool
 processing each track twice; the app has no such filter, so its chapter list
 shows both until the MP3s go — which `-d` does, deleting each MP3 only after
@@ -102,7 +151,7 @@ from scanning all 127 books and 4,376 files in `~/〇/[197] オーディオブ�
 Two findings shaped it. Chapter markers must be **kept** — they name a real part
 of the work, and dropping them cost 30 books their titles. And the language
 bracket codes are used consistently on ebook files but appear on only 3 of 127
-audiobook folders, so language is a bonus, never a source to depend on.
+audiobook directories, so language is a bonus, never a source to depend on.
 
 `demojibake()` guards itself by requiring the repaired string to come out ≥80 %
 Cyrillic; without that it would mangle `Anéantir`, `Zoë Schiffer` and `Sněženka`.
@@ -112,7 +161,7 @@ strings survive.
 **Language detection reads the name up to ` -- `, and nothing after it.**
 Everything after the separator is 白い熊's tagging — bracket codes, the year, and
 genre words written in Japanese (小説, 哲学, ルポルタージュ), which is why the
-whole name cannot be used: a German book's folder ends in kanji. Everything
+whole name cannot be used: a German book's directory ends in kanji. Everything
 before it is the title and author as written, and carries subtitles and series
 text that the `book`/`author` split discards. `before_tags()` does this for both
 directory and file names.
@@ -156,7 +205,7 @@ lists rather than probes — surveying the 127-book library would otherwise cost
 one ffprobe per file across 4,376 of them; as it stands the survey is instant.
 The full `discover()` runs only when a book is actually processed.
 
-**A folder of SRTs is resynced, not re-aligned.** The remux is lossless — the
+**A directory of SRTs is resynced, not re-aligned.** The remux is lossless — the
 decoded audio is bit-identical and only the origin moves, by the encoder delay
 (25 ms measured on Lázár) — so there is no drift to rediscover and transcribing
 hundreds of hours would produce nothing. `_resync_from_srt()` reads the existing
@@ -458,22 +507,24 @@ case the code guards against. Re-check against all five after touching
 ## Running it
 
 ```
-shiroikuma-jisho-subtitles ~/tmp/subtitles/1        # ~/0/bin, wraps the venv
-~/venv.shiroikuma-jisho-subtitles/bin/python -m pytest -q
+subtitles epub ~/tmp/subtitles/1
+~/venv.shiroikuma-subtitles/bin/python -m pytest -q
 ```
 
-`bin/shiroikuma-jisho-subtitles` carries the full `-h`. Two tests enforce that
-every subcommand and every option appears in it, so a new flag fails the suite
-until it is documented — a flag nobody can discover may as well not exist.
+The `epub` manual is in `subtitles.org` (`** epub — books`). Two tests
+enforce that every option appears in it, so a new flag fails the suite until it
+is documented — a flag nobody can discover may as well not exist. The tests
+tangle `subtitles.org` into a temporary directory and run that, never
+`~/0/bin/subtitles`, which is whatever was tangled last; they need `emacs`.
 
-`-s` (setup/verify) lives in the wrapper rather than in argparse because it has
+`-s` (setup/verify) lives in the script rather than in argparse because it has
 to run on a machine with no virtualenv — it cannot go through the venv's Python.
-Two bash traps to respect there: the file runs under `set -e`, so every bare
+Two bash traps to respect there: it runs under `set -e`, so every bare
 conditional used for its side effect needs `|| true`; and `$?` inside an
 `if ! cmd; then` branch is the negation's status, not the command's, which once
 made a broken environment report itself ready.
 
-Transcripts and VAD results cache in `~/.cache/jisho-subs`; runs after the first
+Transcripts and VAD results cache in `~/.cache/subtitles`; runs after the first
 skip the GPU work entirely. Use `--force` to re-transcribe.
 
 `cuda.py` re-execs once to put the venv's own cuDNN/cuBLAS on `LD_LIBRARY_PATH`;

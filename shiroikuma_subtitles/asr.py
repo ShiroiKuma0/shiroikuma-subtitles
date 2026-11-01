@@ -43,7 +43,7 @@ class Transcript:
 
 def default_cache_dir() -> str:
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return os.path.join(base, "jisho-subs")
+    return os.path.join(base, "subtitles")
 
 
 def _content_key(path: str, chunk: int = 1 << 20) -> str:

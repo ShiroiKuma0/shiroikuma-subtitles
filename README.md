@@ -1,15 +1,26 @@
-# shiroikuma-jisho-subtitles
+# shiroikuma-subtitles
 
-Turn an EPUB and its audiobook into **one-sentence-per-cue SRT files** for
-[shiroikuma-jisho](https://github.com/shiroikuma/shiroikuma-jisho).
+Subtitles for [shiroikuma-jisho](https://github.com/shiroikuma/shiroikuma-jisho),
+the player that speaks **one cue and stops**, from two kinds of source:
 
 ```
-shiroikuma-jisho-subtitles ~/books/Lázár
+subtitles epub ~/books/Lázár        # an EPUB and its audiobook
+subtitles mkv -M film.mkv           # a film's dubbed soundtrack
+subtitles                           # the subcommands
 ```
 
-One command. Whatever EPUB, whatever audio — one file or a hundred and eleven —
-SRTs land beside each audio file, named to match, and the app picks them up by
-itself.
+- **`subtitles epub`** turns an EPUB and its audiobook into one-sentence-per-cue
+  SRTs whose text is the book's own — or, with `--tts`, reads a book with no
+  audiobook aloud. Whatever EPUB, whatever audio, one file or a hundred and
+  eleven: SRTs land beside each audio file, named to match, and the app picks
+  them up by itself.
+- **`subtitles mkv`** transcribes a film's dub (Japanese by default) with
+  Whisper, timed by the original's subtitles, cross-checks every line against
+  them, and with `-M` puts the SRT into the MKV in place. Its manual is
+  `subtitles mkv -h`, its reasoning `subtitles.org`.
+- **`subtitles lint`** checks SRTs of either kind against the app's parser.
+
+The rest of this page is about `epub`.
 
 ## What it is for
 
@@ -33,7 +44,7 @@ It works out what a directory is rather than asking for a mode:
 | an EPUB and audio | the full pipeline |
 | MP3s **and SRTs** | converts the audio, moves those cues onto it and re-snaps them to the pauses — **no transcription**, since the remux is lossless. `--realign` for a full re-alignment |
 | MP3s alone | converts the audio and stops |
-| **folders of the above** | surveys them all, shows the plan, asks once, then works through them |
+| **directories of the above** | surveys them all, shows the plan, asks once, then works through them |
 
 `-n` on a library prints the plan and stops.
 
@@ -66,7 +77,7 @@ It works out what a directory is rather than asking for a mode:
   audio of the same length, so a bad conversion can never take the original with
   it, and it asks first unless `-y` is given. `--keep-mp3` skips conversion.
 - **Missing or garbled tags.** MP3 audiobook tags are usually unhelpful, so the
-  conversion rewrites them from the folder name — `Book, Author -- [codes]
+  conversion rewrites them from the directory name — `Book, Author -- [codes]
   (year)` gives album, artist, composer (narrator), date, language and track.
   Per-track titles come from the tag, then the filename, and are left unset
   rather than filled with a restatement of the book. Chapter markers
@@ -79,20 +90,27 @@ It works out what a directory is rather than asking for a mode:
 ## Install
 
 ```
-git clone git@github.com:ShiroiKuma0/shiroikuma-jisho-subtitles.git
-ln -s "$PWD/shiroikuma-jisho-subtitles/bin/shiroikuma-jisho-subtitles" ~/0/bin/
-shiroikuma-jisho-subtitles -s
+git clone git@github.com:ShiroiKuma0/shiroikuma-subtitles.git ~/git/shiroikuma-subtitles
+cd ~/git/shiroikuma-subtitles
+emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-babel-tangle-file "subtitles.org"))'
+subtitles -s
 ```
+
+The script is literate: `subtitles.org` tangles into `~/0/bin/subtitles`, one
+file that stands on its own — the Python half of `mkv` rides inside it. It
+needs the virtualenv `~/venv.shiroikuma-subtitles`, not the checkout.
 
 `-s` does the rest on a fresh Debian, Ubuntu or Tuxedo OS machine: works out
 which system packages are missing and installs them through apt, builds the
-virtualenv, installs this package into it, then verifies the result. Run on a
+virtualenv, installs into it everything both subcommands need — this package
+(editable from the checkout, or from GitHub when there is none), torch with
+CUDA and openai-whisper for `mkv`, Piper for German — then verifies the result. Run on a
 machine that is already set up it changes nothing and simply reports what it
 finds, component by component, ending with whether the machine is ready.
 `-s --rebuild` throws the virtualenv away and builds it again — only the
 virtualenv; books, subtitles and the transcript cache are never touched.
 
-`shiroikuma-jisho-subtitles -h` documents the whole pipeline and every option.
+`subtitles epub -h` documents the whole pipeline and every option.
 
 `ffmpeg` and `ffprobe` must be on `PATH`. A CUDA GPU is optional but worth
 having: `large-v3` runs at ~3.9× realtime on 24 CPU cores and ~86× realtime on
@@ -101,22 +119,22 @@ an RTX 5090, so a 7¾-hour book is two hours or five minutes.
 ## Use
 
 ```
-shiroikuma-jisho-subtitles BOOKDIR                  # language read from the EPUB
-shiroikuma-jisho-subtitles BOOKDIR -l de            # or state it
-shiroikuma-jisho-subtitles BOOKDIR -d               # …and delete the MP3s after
-shiroikuma-jisho-subtitles BOOKDIR -d -y            # …without being asked
-shiroikuma-jisho-subtitles BOOKDIR --keep-mp3       # do not convert to M4B
-shiroikuma-jisho-subtitles BOOKDIR --report r.txt   # keep the run report
-shiroikuma-jisho-subtitles BOOKDIR -n                # plan only, change nothing
+subtitles epub BOOKDIR                  # language read from the EPUB
+subtitles epub BOOKDIR -l de            # or state it
+subtitles epub BOOKDIR -d               # …and delete the MP3s after
+subtitles epub BOOKDIR -d -y            # …without being asked
+subtitles epub BOOKDIR --keep-mp3       # do not convert to M4B
+subtitles epub BOOKDIR --report r.txt   # keep the run report
+subtitles epub BOOKDIR -n               # plan only, change nothing
 
-shiroikuma-jisho-subtitles convert   BOOKDIR        # only MP3 → M4B, then stop
-shiroikuma-jisho-subtitles sentences BOOKDIR        # the text, as it will be cued
-shiroikuma-jisho-subtitles probe     BOOKDIR        # what would be used
-shiroikuma-jisho-subtitles lint      AUDIODIR       # check the app's SRT contract
+subtitles epub -c          BOOKDIR      # only MP3 → M4B, then stop
+subtitles epub --sentences BOOKDIR      # the text, as it will be cued
+subtitles epub --probe     BOOKDIR      # what would be used
+subtitles lint             AUDIODIR     # check the app's SRT contract
 ```
 
 `BOOKDIR` holds the EPUB (or PDF) and the audio, either loose or in one
-subdirectory. Transcripts are cached under `~/.cache/jisho-subs`, so every run
+subdirectory. Transcripts are cached under `~/.cache/subtitles`, so every run
 after the first is fast; `--force` re-transcribes.
 
 ## How it works
@@ -133,7 +151,7 @@ after the first is fast; `--force` re-transcribes.
 4. **Pause snapping** — Silero VAD moves each cue end into the following silence
    and rescues starts that Whisper placed on a hallucinated word.
 5. **Output** — one SRT per audio file, written to the app's actual parser
-   contract (see `jisho_subs/srt.py`), and a report naming everything dropped.
+   contract (see `shiroikuma_subtitles/srt.py`), and a report naming everything dropped.
 
 There is deliberately **no chapter matching**. The usual reason for it is that
 global alignment is O(n·m) — true of character-level DP, not of token-level
@@ -152,4 +170,5 @@ matching. Measured: 70 000 × 69 000 tokens in 0.8 s; the Japanese worst case,
 
 ## Licence
 
-MIT.
+The Python package is MIT; `subtitles.org`, and the script it tangles
+into, GPL 3 or later.

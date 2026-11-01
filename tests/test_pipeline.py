@@ -4,19 +4,20 @@ Every case here is one that actually bit during development on a real book, so
 they are regression tests rather than coverage decoration.
 """
 
+import functools
 import os
 import zipfile
 
 import pytest
 
-from jisho_subs import align as align_mod
-from jisho_subs import refine as refine_mod
-from jisho_subs import srt as srt_mod
-from jisho_subs.asr import Transcript, Word
-from jisho_subs.audio import natural_key
-from jisho_subs.normalize import proper_nouns, tokenize
-from jisho_subs.segment import Sentence, segment
-from jisho_subs.source import Block, load_epub
+from shiroikuma_subtitles import align as align_mod
+from shiroikuma_subtitles import refine as refine_mod
+from shiroikuma_subtitles import srt as srt_mod
+from shiroikuma_subtitles.asr import Transcript, Word
+from shiroikuma_subtitles.audio import natural_key
+from shiroikuma_subtitles.normalize import proper_nouns, tokenize
+from shiroikuma_subtitles.segment import Sentence, segment
+from shiroikuma_subtitles.source import Block, load_epub
 
 
 # -- reference text ------------------------------------------------------
@@ -286,7 +287,7 @@ def test_decode_reads_the_whole_file_when_the_cover_art_is_broken(tmp_path):
     file, since the bug only appears on genuinely malformed artwork.
     """
     import os
-    from jisho_subs.audio import decode, decoded_seconds, probe
+    from shiroikuma_subtitles.audio import decode, decoded_seconds, probe
 
     book = os.path.expanduser("~/tmp/subtitles/2")
     if not os.path.isdir(book):
@@ -305,7 +306,7 @@ def test_decode_reads_the_whole_file_when_the_cover_art_is_broken(tmp_path):
 
 def test_short_decode_is_reported(tmp_path):
     import numpy as np
-    from jisho_subs.audio import check_decode
+    from shiroikuma_subtitles.audio import check_decode
 
     messages = []
     ok = check_decode("x.mp3", np.zeros(16000 * 107, dtype=np.float32),
@@ -316,7 +317,7 @@ def test_short_decode_is_reported(tmp_path):
 
 def test_full_decode_is_not_reported():
     import numpy as np
-    from jisho_subs.audio import check_decode
+    from shiroikuma_subtitles.audio import check_decode
 
     messages = []
     assert check_decode("x.mp3", np.zeros(16000 * 100, dtype=np.float32),
@@ -326,19 +327,19 @@ def test_full_decode_is_not_reported():
 
 def test_orphan_punctuation_never_becomes_a_cue():
     """Zarathustra's dialogue leaves 352 fragments like `”` and `-` behind."""
-    from jisho_subs.segment import split_block
+    from shiroikuma_subtitles.segment import split_block
     pieces = split_block('Er sprach. ” - Dann ging er.', "de")
     assert all(any(ch.isalnum() for ch in p) for p in pieces), pieces
 
 
 def test_orphan_punctuation_is_kept_not_discarded():
-    from jisho_subs.segment import split_block
+    from shiroikuma_subtitles.segment import split_block
     joined = " ".join(split_block('Er sprach. ” Dann ging er.', "de"))
     assert "”" in joined, "the mark belongs to the text and must survive"
 
 
 def test_a_one_word_sentence_is_still_a_sentence():
-    from jisho_subs.segment import split_block
+    from shiroikuma_subtitles.segment import split_block
     assert "Wehe!" in split_block("Wehe! Der Tag kommt.", "de")
 
 
@@ -346,7 +347,7 @@ def test_a_one_word_sentence_is_still_a_sentence():
 
 def test_filename_is_trimmed_from_the_middle():
     """`…N82531555.mp3` identifies nothing; the track number is at the front."""
-    from jisho_subs.progress import shorten
+    from shiroikuma_subtitles.progress import shorten
     out = shorten("001_111_9783732422098_DEXN82531555.mp3", 24)
     assert out.startswith("001_111_")
     assert out.endswith(".mp3")
@@ -355,10 +356,10 @@ def test_filename_is_trimmed_from_the_middle():
 
 def test_progress_line_fits_the_terminal_and_keeps_the_filename():
     import io
-    from jisho_subs.progress import Progress
+    from shiroikuma_subtitles.progress import Progress
 
     for width in (170, 140, 120, 100, 88, 76):
-        p = Progress(111, "transcribing", tag="[jisho-subs] ",
+        p = Progress(111, "transcribing", tag="[subtitles] ",
                      stream=io.StringIO(), enabled=True)
         p.done, p.weight, p.started = 14, 3500.0, p.started - 30
         line = p._compose("014_111_9783732422098_DEXN82531614.mp3", width)
@@ -370,7 +371,7 @@ def test_progress_line_fits_the_terminal_and_keeps_the_filename():
 
 def test_progress_degrades_to_plain_lines_when_not_a_terminal():
     import io
-    from jisho_subs.progress import Progress
+    from shiroikuma_subtitles.progress import Progress
 
     out = io.StringIO()
     p = Progress(10, "transcribing", stream=out, enabled=False)
@@ -386,7 +387,7 @@ def test_progress_degrades_to_plain_lines_when_not_a_terminal():
 def test_a_single_long_file_still_moves_the_bar():
     """One M4B holding the whole book is `0/1` for a quarter of an hour."""
     import io
-    from jisho_subs.progress import Progress
+    from shiroikuma_subtitles.progress import Progress
 
     p = Progress(1, "transcribing", stream=io.StringIO(), enabled=True)
     p.started -= 60
@@ -402,7 +403,7 @@ def test_a_single_long_file_still_moves_the_bar():
 def test_position_inside_a_file_never_retreats():
     """Batched Whisper yields a batch at a time; a bar that goes back reads as a bug."""
     import io
-    from jisho_subs.progress import Progress
+    from shiroikuma_subtitles.progress import Progress
 
     p = Progress(1, "transcribing", stream=io.StringIO(), enabled=True)
     p.within("a.m4b", 900.0, 3600.0)
@@ -412,7 +413,7 @@ def test_position_inside_a_file_never_retreats():
 
 def test_finishing_a_file_does_not_count_its_position_twice():
     import io
-    from jisho_subs.progress import Progress
+    from shiroikuma_subtitles.progress import Progress
 
     p = Progress(2, "transcribing", stream=io.StringIO(), enabled=True)
     p.within("a.m4b", 1800.0, 3600.0)
@@ -425,11 +426,11 @@ def test_finishing_a_file_does_not_count_its_position_twice():
 def test_with_one_file_the_position_outranks_its_unchanging_name():
     """The name is the same for the whole stage; the position is what moves."""
     import io
-    from jisho_subs.progress import Progress
+    from shiroikuma_subtitles.progress import Progress
 
     for width in (170, 140, 120, 100, 88, 76, 64, 52, 40):
         for done, phase in ((12000.0, ""), (12000.0, "decoding")):
-            p = Progress(1, "transcribing", tag="[jisho-subs] ",
+            p = Progress(1, "transcribing", tag="[subtitles] ",
                          stream=io.StringIO(), enabled=True)
             p.started -= 300
             p.within("PokolenieM.m4b", done, 51306.0, phase)
@@ -443,10 +444,10 @@ def test_with_one_file_the_position_outranks_its_unchanging_name():
 
 def test_with_many_files_the_name_still_outranks_the_position():
     import io
-    from jisho_subs.progress import Progress
+    from shiroikuma_subtitles.progress import Progress
 
     for width in (170, 140, 120, 100, 88, 76):
-        p = Progress(111, "transcribing", tag="[jisho-subs] ",
+        p = Progress(111, "transcribing", tag="[subtitles] ",
                      stream=io.StringIO(), enabled=True)
         p.done, p.weight, p.started = 14, 3500.0, p.started - 30
         p.within("014_111_9783732422098_DEXN82531614.mp3", 120.0, 640.0)
@@ -458,7 +459,7 @@ def test_with_many_files_the_name_still_outranks_the_position():
 def test_a_named_phase_is_shown_but_claims_none_of_the_bar():
     """A minute of ffmpeg is not transcription and is not counted as it."""
     import io
-    from jisho_subs.progress import Progress
+    from shiroikuma_subtitles.progress import Progress
 
     p = Progress(1, "transcribing", stream=io.StringIO(), enabled=True)
     p.within("a.m4b", 1800.0, 3600.0, "decoding")
@@ -473,7 +474,7 @@ def test_a_named_phase_is_shown_but_claims_none_of_the_bar():
 def test_a_phase_change_is_always_drawn():
     """A throttled draw nothing repeats leaves the wrong label on the screen."""
     import io
-    from jisho_subs.progress import Progress
+    from shiroikuma_subtitles.progress import Progress
 
     out = io.StringIO()
     p = Progress(1, "transcribing", stream=out, enabled=True)
@@ -489,7 +490,7 @@ def test_a_phase_change_is_always_drawn():
 def test_a_phase_with_nothing_to_count_still_says_what_it_is():
     """Silero reads the whole file before the first segment appears."""
     import io
-    from jisho_subs.progress import Progress
+    from shiroikuma_subtitles.progress import Progress
 
     p = Progress(1, "transcribing", stream=io.StringIO(), enabled=True)
     p.within("a.m4b", None, 3600.0, "finding speech")
@@ -500,7 +501,7 @@ def test_a_phase_with_nothing_to_count_still_says_what_it_is():
 def test_a_long_single_file_writes_deciles_to_a_log():
     """Not a terminal: the one advance at the end is not a progress report."""
     import io
-    from jisho_subs.progress import Progress
+    from shiroikuma_subtitles.progress import Progress
 
     out = io.StringIO()
     p = Progress(1, "transcribing", stream=out, enabled=False)
@@ -515,7 +516,7 @@ def test_a_long_single_file_writes_deciles_to_a_log():
 
 
 def test_implausibly_short_interpolations_are_reported():
-    from jisho_subs.report import implausible
+    from shiroikuma_subtitles.report import implausible
 
     real = align_mod.Cue(Sentence("Ein recht langer deutscher Satz mit vielen Woertern darin.",
                                   "c", False, 0), 0, 0.0, 8.0, 1.0)
@@ -538,7 +539,7 @@ def _make_mp3(path, seconds=2):
 
 
 def test_only_mp3_is_flagged_for_conversion(tmp_path):
-    from jisho_subs.convert import needs_conversion
+    from shiroikuma_subtitles.convert import needs_conversion
 
     class F:
         def __init__(self, p): self.path = p
@@ -549,10 +550,10 @@ def test_only_mp3_is_flagged_for_conversion(tmp_path):
 
 def test_decoding_reports_position_and_still_returns_every_sample(tmp_path):
     """Streaming the ffmpeg pipe must not cost a single sample."""
-    from jisho_subs.convert import have_ffmpeg
+    from shiroikuma_subtitles.convert import have_ffmpeg
     if not have_ffmpeg():
         return
-    from jisho_subs.audio import decode, decoded_seconds
+    from shiroikuma_subtitles.audio import decode, decoded_seconds
 
     src = _make_mp3(tmp_path / "tone.mp3", seconds=3)
     seen = []
@@ -565,10 +566,10 @@ def test_decoding_reports_position_and_still_returns_every_sample(tmp_path):
 
 def test_a_failed_decode_still_raises_with_ffmpeg_s_own_message(tmp_path):
     import subprocess
-    from jisho_subs.convert import have_ffmpeg
+    from shiroikuma_subtitles.convert import have_ffmpeg
     if not have_ffmpeg():
         return
-    from jisho_subs.audio import decode
+    from shiroikuma_subtitles.audio import decode
 
     broken = tmp_path / "broken.mp3"
     broken.write_bytes(b"not audio at all")
@@ -581,8 +582,8 @@ def test_a_failed_decode_still_raises_with_ffmpeg_s_own_message(tmp_path):
 
 
 def test_conversion_produces_a_seekable_m4b_and_keeps_the_original(tmp_path):
-    from jisho_subs.audio import probe
-    from jisho_subs.convert import convert, have_ffmpeg
+    from shiroikuma_subtitles.audio import probe
+    from shiroikuma_subtitles.convert import convert, have_ffmpeg
     if not have_ffmpeg():
         pytest.skip("ffmpeg not available")
 
@@ -603,8 +604,8 @@ def test_conversion_produces_a_seekable_m4b_and_keeps_the_original(tmp_path):
 
 
 def test_conversion_is_skipped_when_the_target_exists(tmp_path):
-    from jisho_subs.audio import probe
-    from jisho_subs.convert import convert, have_ffmpeg
+    from shiroikuma_subtitles.audio import probe
+    from shiroikuma_subtitles.convert import convert, have_ffmpeg
     if not have_ffmpeg():
         pytest.skip("ffmpeg not available")
     src = _make_mp3(tmp_path / "a.mp3", seconds=1)
@@ -616,15 +617,15 @@ def test_conversion_is_skipped_when_the_target_exists(tmp_path):
 
 def test_discover_prefers_the_seekable_directory(tmp_path):
     """Once converted, a book holds both an MP3 set and an M4B set."""
-    from jisho_subs.audio import discover
-    from jisho_subs.convert import convert, have_ffmpeg
+    from shiroikuma_subtitles.audio import discover
+    from shiroikuma_subtitles.convert import convert, have_ffmpeg
     if not have_ffmpeg():
         pytest.skip("ffmpeg not available")
 
     book = tmp_path / "book"
     mp3dir = book / "audio"
     mp3dir.mkdir(parents=True)
-    from jisho_subs.audio import probe
+    from shiroikuma_subtitles.audio import probe
     srcs = [probe(_make_mp3(mp3dir / f"{i:02d} t.mp3", seconds=1)) for i in (1, 2)]
     convert(srcs, str(book / "audio [m4b]"))
 
@@ -636,8 +637,8 @@ def test_discover_prefers_the_seekable_directory(tmp_path):
 
 
 def test_the_m4b_lands_beside_its_mp3(tmp_path):
-    from jisho_subs.audio import probe
-    from jisho_subs.convert import convert, have_ffmpeg, target_dir
+    from shiroikuma_subtitles.audio import probe
+    from shiroikuma_subtitles.convert import convert, have_ffmpeg, target_dir
     if not have_ffmpeg():
         pytest.skip("ffmpeg not available")
     src = probe(_make_mp3(tmp_path / "001 Track.mp3", seconds=1))
@@ -648,9 +649,9 @@ def test_the_m4b_lands_beside_its_mp3(tmp_path):
 
 
 def test_the_mp3_twin_is_shadowed_not_processed_twice(tmp_path):
-    """After converting in place both copies sit in one folder."""
-    from jisho_subs.audio import discover, probe
-    from jisho_subs.convert import convert, have_ffmpeg, target_dir
+    """After converting in place both copies sit in one directory."""
+    from shiroikuma_subtitles.audio import discover, probe
+    from shiroikuma_subtitles.convert import convert, have_ffmpeg, target_dir
     if not have_ffmpeg():
         pytest.skip("ffmpeg not available")
     for i in (1, 2):
@@ -666,7 +667,7 @@ def test_the_mp3_twin_is_shadowed_not_processed_twice(tmp_path):
 
 
 def test_a_lone_mp3_is_still_used(tmp_path):
-    from jisho_subs.audio import discover
+    from shiroikuma_subtitles.audio import discover
     _make_mp3(tmp_path / "solo.mp3", seconds=1)
     found = discover(str(tmp_path))
     assert len(found) == 1 and found[0].path.endswith(".mp3")
@@ -675,8 +676,8 @@ def test_a_lone_mp3_is_still_used(tmp_path):
 # -- deleting the MP3s after conversion (-d) -----------------------------
 
 def test_mp3_is_deleted_only_after_its_m4b_verifies(tmp_path):
-    from jisho_subs.audio import probe
-    from jisho_subs.convert import convert, delete_sources, have_ffmpeg, target_dir
+    from shiroikuma_subtitles.audio import probe
+    from shiroikuma_subtitles.convert import convert, delete_sources, have_ffmpeg, target_dir
     if not have_ffmpeg():
         pytest.skip("ffmpeg not available")
     src = probe(_make_mp3(tmp_path / "a.mp3", seconds=2))
@@ -688,8 +689,8 @@ def test_mp3_is_deleted_only_after_its_m4b_verifies(tmp_path):
 
 
 def test_mp3_survives_when_the_m4b_is_missing(tmp_path):
-    from jisho_subs.audio import probe
-    from jisho_subs.convert import delete_sources
+    from shiroikuma_subtitles.audio import probe
+    from shiroikuma_subtitles.convert import delete_sources
     src = probe(_make_mp3(tmp_path / "a.mp3", seconds=1))
     deleted, kept = delete_sources([src], str(tmp_path))
     assert deleted == [] and len(kept) == 1
@@ -698,8 +699,8 @@ def test_mp3_survives_when_the_m4b_is_missing(tmp_path):
 
 def test_mp3_survives_when_the_m4b_is_truncated(tmp_path):
     """A half-written conversion must not take the original with it."""
-    from jisho_subs.audio import probe
-    from jisho_subs.convert import convert, delete_sources, have_ffmpeg, target_dir
+    from shiroikuma_subtitles.audio import probe
+    from shiroikuma_subtitles.convert import convert, delete_sources, have_ffmpeg, target_dir
     if not have_ffmpeg():
         pytest.skip("ffmpeg not available")
     src = probe(_make_mp3(tmp_path / "a.mp3", seconds=4))
@@ -719,8 +720,8 @@ def test_mp3_survives_when_the_m4b_is_truncated(tmp_path):
 
 
 def test_mp3_survives_when_the_m4b_is_not_audio(tmp_path):
-    from jisho_subs.audio import probe
-    from jisho_subs.convert import delete_sources
+    from shiroikuma_subtitles.audio import probe
+    from shiroikuma_subtitles.convert import delete_sources
     src = probe(_make_mp3(tmp_path / "a.mp3", seconds=1))
     (tmp_path / "a.m4b").write_bytes(b"not audio at all")
     deleted, kept = delete_sources([src], str(tmp_path))
@@ -729,8 +730,8 @@ def test_mp3_survives_when_the_m4b_is_not_audio(tmp_path):
 
 def test_already_converted_mp3s_are_still_deletable_on_a_later_run(tmp_path):
     """discover() shadows them, so -d must find them by another route."""
-    from jisho_subs.audio import discover, probe
-    from jisho_subs.convert import convert, delete_sources, have_ffmpeg, target_dir
+    from shiroikuma_subtitles.audio import discover, probe
+    from shiroikuma_subtitles.convert import convert, delete_sources, have_ffmpeg, target_dir
     if not have_ffmpeg():
         pytest.skip("ffmpeg not available")
     for i in (1, 2):
@@ -751,20 +752,92 @@ def test_already_converted_mp3s_are_still_deletable_on_a_later_run(tmp_path):
     assert len(list(tmp_path.glob("*.m4b"))) == 2
 
 
-# -- the wrapper script --------------------------------------------------
+# -- the script ----------------------------------------------------------
 
-WRAPPER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                       "bin", "shiroikuma-jisho-subtitles")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def test_the_wrapper_is_valid_bash():
+@functools.lru_cache(maxsize=None)
+def SCRIPT():
+    """`subtitles`, tangled from subtitles.org into a temporary directory.
+
+    The source of the script is the Org file, never ~/0/bin/subtitles: that
+    is whatever was tangled last, and testing it would test the install, not
+    the checkout."""
+    import shutil
     import subprocess
-    assert subprocess.run(["bash", "-n", WRAPPER]).returncode == 0
+    import tempfile
+    if not shutil.which("emacs"):
+        pytest.skip("emacs is needed to tangle subtitles.org")
+    out = tempfile.mkdtemp(prefix="subtitles-tangle-")
+    org = os.path.join(out, "subtitles.org")
+    with open(os.path.join(REPO, "subtitles.org"), encoding="utf-8") as f:
+        text = f.read()
+    target = os.path.join(out, "subtitles")
+    assert ":tangle ~/0/bin/subtitles " in text
+    with open(org, "w", encoding="utf-8") as f:
+        f.write(text.replace(":tangle ~/0/bin/subtitles ", f":tangle {target} "))
+    subprocess.run(["emacs", "--batch", "-l", "org", "--eval",
+                    "(progn (setq org-confirm-babel-evaluate nil)"
+                    f" (org-babel-tangle-file \"{org}\"))"],
+                   check=True, capture_output=True)
+    assert os.path.isfile(target), "the tangle wrote nothing"
+    return target
 
 
-def test_the_wrapper_help_documents_every_mode():
+def test_the_script_is_valid_bash():
     import subprocess
-    out = subprocess.run(["bash", WRAPPER, "-h"], capture_output=True, text=True,
+    assert subprocess.run(["bash", "-n", SCRIPT()]).returncode == 0
+
+
+def test_subtitles_alone_names_every_subcommand():
+    """Run on its own, the script says what it can do, not what went wrong."""
+    import subprocess
+    r = subprocess.run(["bash", SCRIPT()], capture_output=True, text=True,
+                       env={**os.environ, "NO_COLOR": "1"})
+    assert r.returncode == 0
+    for word in ("epub", "mkv", "lint", "-s"):
+        assert f"subtitles {word}" in r.stdout, f"the overview omits {word!r}"
+
+
+def test_an_unknown_subcommand_is_refused_with_the_list():
+    import subprocess
+    r = subprocess.run(["bash", SCRIPT(), "film"], capture_output=True,
+                       text=True, env={**os.environ, "NO_COLOR": "1"})
+    assert r.returncode != 0
+    assert "subtitles mkv" in r.stderr and "no subcommand 'film'" in r.stderr
+
+
+def test_the_film_python_rides_inside_the_script_and_compiles(tmp_path):
+    """`mkv` carries its Python half as a here-document, so the script needs
+    nothing beside it; a quoting slip there would only show on a film."""
+    import py_compile
+    import subprocess
+    text = open(SCRIPT(), encoding="utf-8").read()
+    start = text.index("mkv_whisper_py() {\n    cat <<'PYEOF'\n")
+    body = text[start:].split("\n", 2)[2]
+    body = body[:body.index("\nPYEOF\n")]
+    assert "def main():" in body and "argparse" in body
+    path = tmp_path / "subtitles-whisper.py"
+    path.write_text(body + "\n", encoding="utf-8")
+    py_compile.compile(str(path), doraise=True)
+    # And the function writes exactly that.
+    out = subprocess.run(["bash", "-c", f"source <(sed '/^case \"${{1:-}}\" in$/,$d' {SCRIPT()}); mkv_whisper_py"],
+                         capture_output=True, text=True).stdout
+    assert out == body + "\n"
+
+
+def test_the_film_manual_is_reachable():
+    import subprocess
+    r = subprocess.run(["bash", SCRIPT(), "mkv", "-h"], capture_output=True,
+                       text=True, env={**os.environ, "NO_COLOR": "1"})
+    assert "Usage: subtitles mkv" in r.stdout
+    assert "subtitles.sh" not in r.stdout
+
+
+def test_the_script_help_documents_every_mode():
+    import subprocess
+    out = subprocess.run(["bash", SCRIPT(), "epub", "-h"], capture_output=True, text=True,
                          env={**os.environ, "NO_COLOR": "1"}).stdout
     for expected in ("SETTING UP A MACHINE", "DELETING THE MP3s",
                      "MP3 CONVERSION", "-s", "-d, --delete-mp3", "--rebuild",
@@ -776,9 +849,9 @@ def test_the_short_tts_help_lists_every_tts_option():
     """`-h tts` exists so the options need not be hunted for; if a new flag
     lands only in the full manual, hunting is exactly what it costs."""
     import subprocess
-    from jisho_subs.cli import build_parser
+    from shiroikuma_subtitles.cli import build_parser
 
-    out = subprocess.run(["bash", WRAPPER, "-h", "tts"], capture_output=True,
+    out = subprocess.run(["bash", SCRIPT(), "epub", "-h", "tts"], capture_output=True,
                          text=True, env={**os.environ, "NO_COLOR": "1"}).stdout
     missing = [f for a in build_parser()._actions for f in a.option_strings
                if f.startswith("--tts") and f not in out]
@@ -789,9 +862,9 @@ def test_the_short_tts_help_is_actually_short():
     import subprocess
 
     env = {**os.environ, "NO_COLOR": "1"}
-    short = subprocess.run(["bash", WRAPPER, "-h", "tts"],
+    short = subprocess.run(["bash", SCRIPT(), "epub", "-h", "tts"],
                            capture_output=True, text=True, env=env).stdout
-    full = subprocess.run(["bash", WRAPPER, "-h"],
+    full = subprocess.run(["bash", SCRIPT(), "epub", "-h"],
                           capture_output=True, text=True, env=env).stdout
     assert len(short.splitlines()) < len(full.splitlines()) / 5
     assert "MP3 CONVERSION" not in short, "it is showing the whole manual again"
@@ -802,9 +875,9 @@ def test_tts_help_is_reachable_both_ways():
     import subprocess
 
     env = {**os.environ, "NO_COLOR": "1"}
-    a = subprocess.run(["bash", WRAPPER, "-h", "tts"],
+    a = subprocess.run(["bash", SCRIPT(), "epub", "-h", "tts"],
                        capture_output=True, text=True, env=env).stdout
-    b = subprocess.run(["bash", WRAPPER, "--tts-help"],
+    b = subprocess.run(["bash", SCRIPT(), "epub", "--tts-help"],
                        capture_output=True, text=True, env=env).stdout
     assert a == b and "--tts-voices" in a
 
@@ -813,14 +886,14 @@ def test_the_short_tts_help_states_the_actual_defaults():
     """The voice and the speed are the two things asked about first, and a
     default documented as a different value is worse than none."""
     import subprocess
-    from jisho_subs.cli import build_parser
-    from jisho_subs.tts import TtsOptions
+    from shiroikuma_subtitles.cli import build_parser
+    from shiroikuma_subtitles.tts import TtsOptions
 
-    out = subprocess.run(["bash", WRAPPER, "-h", "tts"], capture_output=True,
+    out = subprocess.run(["bash", SCRIPT(), "epub", "-h", "tts"], capture_output=True,
                          text=True, env={**os.environ, "NO_COLOR": "1"}).stdout
     assert str(TtsOptions().speaker) in out, "the default voice id is not shown"
 
-    from jisho_subs.tts import default_speed
+    from shiroikuma_subtitles.tts import default_speed
     # Speed depends on the language, so both figures have to be discoverable.
     assert str(default_speed("ja")) in out, "the Japanese default speed is missing"
     assert str(default_speed("de")) in out, "the German default speed is missing"
@@ -835,7 +908,7 @@ def test_the_short_tts_help_shows_how_to_actually_produce_the_m4b():
     """Knowing every flag is not knowing the command to type."""
     import subprocess
 
-    out = subprocess.run(["bash", WRAPPER, "-h", "tts"], capture_output=True,
+    out = subprocess.run(["bash", SCRIPT(), "epub", "-h", "tts"], capture_output=True,
                          text=True, env={**os.environ, "NO_COLOR": "1"}).stdout
     assert "Producing the M4B" in out
     assert "--tts --epub BOOK.epub -o OUTDIR" in out
@@ -851,9 +924,9 @@ def test_a_bare_epub_is_told_how_to_synthesise_it(tmp_path):
 
     book = tmp_path / "name.epub"
     book.write_bytes(b"not really an epub")
-    r = subprocess.run([sys.executable, "-m", "jisho_subs", str(book)],
+    r = subprocess.run([sys.executable, "-m", "shiroikuma_subtitles", str(book)],
                        capture_output=True, text=True,
-                       cwd=os.path.dirname(WRAPPER),
+                       cwd=REPO,
                        env={**os.environ, "NO_COLOR": "1"})
     assert r.returncode != 0
     assert "--tts" in r.stderr, "it does not mention the mode that needs no audio"
@@ -863,7 +936,7 @@ def test_a_bare_epub_is_told_how_to_synthesise_it(tmp_path):
 
 def test_a_book_with_no_audio_is_told_what_to_do_instead():
     """It used to return False and print nothing at all, exiting 1 in silence."""
-    from jisho_subs.cli import _no_audio_advice
+    from shiroikuma_subtitles.cli import _no_audio_advice
 
     lines = _no_audio_advice("/books/Ningyo no Hiisama.epub")
     joined = " ".join(lines)
@@ -874,13 +947,13 @@ def test_a_book_with_no_audio_is_told_what_to_do_instead():
     assert "'/books/a b.epub'" in quoted
 
 
-def test_the_wrapper_reports_a_missing_venv_rather_than_crashing(tmp_path):
+def test_the_script_reports_a_missing_venv_rather_than_crashing(tmp_path):
     """Pointed at a path with no venv, `run` must explain, not traceback."""
     import subprocess
-    r = subprocess.run(["bash", WRAPPER, "probe", str(tmp_path)],
+    r = subprocess.run(["bash", SCRIPT(), "epub", "probe", str(tmp_path)],
                        capture_output=True, text=True,
                        env={**os.environ, "NO_COLOR": "1",
-                            "JISHO_SUBS_VENV": str(tmp_path / "absent")})
+                            "SUBTITLES_VENV": str(tmp_path / "absent")})
     assert r.returncode != 0
     assert "no interpreter" in r.stderr
     assert "-m venv" in r.stderr, "it should say how to create one"
@@ -926,9 +999,9 @@ def test_nothing_is_retired_when_there_was_no_earlier_srt(tmp_path):
 def test_every_option_is_documented_in_the_manual():
     """A flag nobody can discover may as well not exist."""
     import subprocess
-    from jisho_subs.cli import build_parser
+    from shiroikuma_subtitles.cli import build_parser
 
-    man = subprocess.run(["bash", WRAPPER, "-h"], capture_output=True, text=True,
+    man = subprocess.run(["bash", SCRIPT(), "epub", "-h"], capture_output=True, text=True,
                          env={**os.environ, "NO_COLOR": "1"}).stdout
     undocumented = []
     for action in build_parser()._actions:
@@ -942,7 +1015,7 @@ def test_every_option_is_documented_in_the_manual():
 
 def test_there_are_no_bare_word_subcommands():
     """Every mode is an option; nothing is a positional verb."""
-    from jisho_subs.cli import build_parser
+    from shiroikuma_subtitles.cli import build_parser
 
     parser = build_parser()
     for action in parser._actions:
@@ -956,13 +1029,13 @@ def test_there_are_no_bare_word_subcommands():
 
 def test_the_modes_are_mutually_exclusive():
     import pytest as _pytest
-    from jisho_subs.cli import build_parser
+    from shiroikuma_subtitles.cli import build_parser
     with _pytest.raises(SystemExit):
         build_parser().parse_args(["-c", "--probe", "/tmp"])
 
 
 def test_dash_n_is_dry_run():
-    from jisho_subs.cli import build_parser
+    from shiroikuma_subtitles.cli import build_parser
     args = build_parser().parse_args(["run", "/tmp", "-n"])
     assert args.dry_run is True
 
@@ -970,7 +1043,7 @@ def test_dash_n_is_dry_run():
 # -- metadata derived for the converted audio ----------------------------
 
 def test_directory_name_yields_book_author_year_language():
-    from jisho_subs.metadata import parse_directory
+    from shiroikuma_subtitles.metadata import parse_directory
     i = parse_directory("/x/Empuzjon, Olga Tokarczuk -- [197][942] (2022)")
     assert (i.book, i.author, i.year, i.language) == \
         ("Empuzjon", "Olga Tokarczuk", "2022", "pl")
@@ -978,19 +1051,19 @@ def test_directory_name_yields_book_author_year_language():
 
 
 def test_year_between_title_and_author_is_understood():
-    from jisho_subs.metadata import parse_directory
+    from shiroikuma_subtitles.metadata import parse_directory
     i = parse_directory("/x/Meditations (180) Marcus Aurelius")
     assert (i.book, i.author, i.year) == ("Meditations", "Marcus Aurelius", "180")
 
 
 def test_an_inverted_article_is_not_an_author():
-    from jisho_subs.metadata import parse_directory
+    from shiroikuma_subtitles.metadata import parse_directory
     i = parse_directory("/x/Achilles trap, the, Steve Coll -- [197] (2024)")
     assert i.book == "Achilles trap, the" and i.author == "Steve Coll"
 
 
 def test_a_narrator_is_told_apart_from_the_author():
-    from jisho_subs.metadata import parse_directory
+    from shiroikuma_subtitles.metadata import parse_directory
     i = parse_directory("/x/Homage to Catalonia, George Orwell, Patrick Tull -- [197]")
     assert i.author == "George Orwell" and i.narrator == "Patrick Tull"
     j = parse_directory("/x/Knife, Meditations after an attempted murder, "
@@ -999,19 +1072,19 @@ def test_a_narrator_is_told_apart_from_the_author():
 
 
 def test_a_series_part_is_not_a_person():
-    from jisho_subs.metadata import parse_directory
+    from shiroikuma_subtitles.metadata import parse_directory
     i = parse_directory("/x/Absolutely Mental, Season 2, Ricky Gervais -- [197]")
     assert i.author == "Ricky Gervais" and "Season 2" in i.book
 
 
 def test_cp1251_tags_read_as_latin1_are_repaired():
-    from jisho_subs.metadata import demojibake
+    from shiroikuma_subtitles.metadata import demojibake
     assert demojibake("×àñòü 1 - 1") == "Часть 1 - 1"
     assert demojibake("Ëåâ Íèêîëàåâè÷ Òîëñòîé") == "Лев Николаевич Толстой"
 
 
 def test_ordinary_accented_text_is_never_touched():
-    from jisho_subs.metadata import demojibake
+    from shiroikuma_subtitles.metadata import demojibake
     for s in ("Anéantir", "Zoë Schiffer", "Sněženka", "Nocni wędrowcy",
               "Lázár", "Fröhliche Wissenschaft"):
         assert demojibake(s) == s
@@ -1019,7 +1092,7 @@ def test_ordinary_accented_text_is_never_touched():
 
 def test_chapter_markers_are_kept_as_titles():
     """The author divided the book that way; the marker names a real part."""
-    from jisho_subs.metadata import BookInfo, clean_track_title
+    from shiroikuma_subtitles.metadata import BookInfo, clean_track_title
     info = BookInfo(directory="d", book="Erfolg", author="Lion Feuchtwanger")
     for marker in ("Kapitel 1", "Глава 7", "Chapitre 3", "第4章", "Vorrede",
                    "Часть 1 - 1", "Book I",
@@ -1032,7 +1105,7 @@ def test_chapter_markers_are_kept_as_titles():
 
 
 def test_restatements_are_discarded():
-    from jisho_subs.metadata import BookInfo, clean_track_title
+    from shiroikuma_subtitles.metadata import BookInfo, clean_track_title
     info = BookInfo(directory="Achilles trap, the, Steve Coll -- [197]",
                     book="Achilles trap, the", author="Steve Coll")
     for junk in ("The Achilles Trap", "The_Achilles_Trap_A", "Steve Coll",
@@ -1043,7 +1116,7 @@ def test_restatements_are_discarded():
 
 
 def test_padded_counters_go_but_authorial_numbers_stay():
-    from jisho_subs.metadata import BookInfo, clean_track_title
+    from shiroikuma_subtitles.metadata import BookInfo, clean_track_title
     info = BookInfo(directory="d", book="Война и мир. Том 1", author="Лев Толстой")
     assert clean_track_title("Часть 1 - 1", info)[0] == "Часть 1 - 1"
     info2 = BookInfo(directory="d", book="Greenlights", author="X")
@@ -1066,7 +1139,7 @@ def test_a_long_number_is_not_a_counter():
     Czech diary chapters, and the title of "Audiobook: 1984" itself — which is
     the book's name, not a number after it.
     """
-    from jisho_subs.metadata import BookInfo, clean_track_title
+    from shiroikuma_subtitles.metadata import BookInfo, clean_track_title
     orwell = BookInfo(
         directory="Nineteen eighty-four, George Orwell -- [197] (1948)",
         book="Nineteen eighty-four", author="George Orwell")
@@ -1080,8 +1153,8 @@ def test_a_long_number_is_not_a_counter():
     assert clean_track_title(dated, czech)[0] == dated
 
 
-def test_built_tags_carry_the_folder_facts():
-    from jisho_subs.metadata import build_tags, parse_directory
+def test_built_tags_carry_the_directory_facts():
+    from shiroikuma_subtitles.metadata import build_tags, parse_directory
     info = parse_directory("/x/Nocni wędrowcy, Wojciech Jagielski -- [197][942] (2021)")
     tags, dropped = build_tags(info, {"title": "01_nocni wedrowcy",
                                       "comment": "czyta X"}, "01-nocni.mp3", 1, 22)
@@ -1095,7 +1168,7 @@ def test_built_tags_carry_the_folder_facts():
 
 def test_language_is_written_on_the_stream_not_the_container():
     """MP4 drops a format-level language tag, leaving the track 'und'."""
-    from jisho_subs.convert import _metadata_args
+    from shiroikuma_subtitles.convert import _metadata_args
     args = _metadata_args({"language": "pol", "album": "X"})
     assert "-metadata:s:a:0" in args
     assert args[args.index("-metadata:s:a:0") + 1] == "language=pol"
@@ -1104,8 +1177,8 @@ def test_language_is_written_on_the_stream_not_the_container():
 def test_the_copy_is_bit_identical_to_the_source(tmp_path):
     """Lossless is a claim worth checking, not asserting."""
     import subprocess
-    from jisho_subs.audio import probe
-    from jisho_subs.convert import convert, have_ffmpeg, target_dir
+    from shiroikuma_subtitles.audio import probe
+    from shiroikuma_subtitles.convert import convert, have_ffmpeg, target_dir
     if not have_ffmpeg():
         pytest.skip("ffmpeg not available")
 
@@ -1123,8 +1196,8 @@ def test_the_copy_is_bit_identical_to_the_source(tmp_path):
 
 
 def test_reencode_falls_back_to_aac(tmp_path):
-    from jisho_subs.audio import probe
-    from jisho_subs.convert import convert, have_ffmpeg, target_dir
+    from shiroikuma_subtitles.audio import probe
+    from shiroikuma_subtitles.convert import convert, have_ffmpeg, target_dir
     if not have_ffmpeg():
         pytest.skip("ffmpeg not available")
     src = probe(_make_mp3(tmp_path / "a.mp3", seconds=2))
@@ -1135,8 +1208,8 @@ def test_reencode_falls_back_to_aac(tmp_path):
 def test_the_fallback_bitrate_follows_the_source(tmp_path):
     """A fixed rate inflates a 32 kbps file and degrades a 192 kbps one."""
     import subprocess
-    from jisho_subs.audio import probe
-    from jisho_subs.convert import _target_bitrate, MIN_BITRATE, MAX_BITRATE
+    from shiroikuma_subtitles.audio import probe
+    from shiroikuma_subtitles.convert import _target_bitrate, MIN_BITRATE, MAX_BITRATE
     for rate in (32, 128, 256):
         path = str(tmp_path / f"{rate}.mp3")
         subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi",
@@ -1150,7 +1223,7 @@ def test_the_fallback_bitrate_follows_the_source(tmp_path):
 
 def test_track_numbers_count_the_book_not_the_batch():
     """Converting one leftover of twenty-two used to tag it 1/1."""
-    from jisho_subs.convert import numbering
+    from shiroikuma_subtitles.convert import numbering
 
     class T:
         def __init__(self, p):
@@ -1166,8 +1239,8 @@ def test_track_numbers_count_the_book_not_the_batch():
 
 
 def test_numbering_survives_a_split_conversion(tmp_path):
-    from jisho_subs.audio import probe, read_tags
-    from jisho_subs.convert import convert, have_ffmpeg, numbering, target_dir
+    from shiroikuma_subtitles.audio import probe, read_tags
+    from shiroikuma_subtitles.convert import convert, have_ffmpeg, numbering, target_dir
     if not have_ffmpeg():
         pytest.skip("ffmpeg not available")
     srcs = [probe(_make_mp3(tmp_path / f"{i:02d} t.mp3", seconds=1))
@@ -1184,8 +1257,8 @@ def test_numbering_survives_a_split_conversion(tmp_path):
 def test_retagging_rewrites_tags_without_touching_the_audio(tmp_path):
     """The only way to fix a book whose source MP3s have been deleted."""
     import subprocess
-    from jisho_subs.audio import probe, read_tags
-    from jisho_subs.convert import convert, have_ffmpeg, numbering, retag, target_dir
+    from shiroikuma_subtitles.audio import probe, read_tags
+    from shiroikuma_subtitles.convert import convert, have_ffmpeg, numbering, retag, target_dir
     if not have_ffmpeg():
         pytest.skip("ffmpeg not available")
 
@@ -1209,7 +1282,7 @@ def test_retagging_rewrites_tags_without_touching_the_audio(tmp_path):
 
 
 def test_retagging_reports_what_it_did():
-    from jisho_subs.convert import retag
+    from shiroikuma_subtitles.convert import retag
     result = retag([])
     assert result.made == [] and result.failed == []
 
@@ -1217,20 +1290,20 @@ def test_retagging_reports_what_it_did():
 # -- guessing a language when nothing states it --------------------------
 
 def test_script_identifies_japanese_and_russian():
-    from jisho_subs.metadata import guess_language
+    from shiroikuma_subtitles.metadata import guess_language
     assert guess_language(["第１章　青豆　見かけにだまされないように"]) == "ja"
     assert guess_language(["День опричника", "Глава 1"]) == "ru"
 
 
 def test_kanji_without_kana_is_still_japanese():
-    from jisho_subs.metadata import guess_language
+    from shiroikuma_subtitles.metadata import guess_language
     assert guess_language(["羅生門", "芥川龍之介"]) == "ja"
 
 
 def test_a_genre_tag_does_not_decide_the_language():
-    """白い熊 tags books with Japanese genre words, so the raw folder name of a
+    """白い熊 tags books with Japanese genre words, so the raw directory name of a
     German book contains kanji."""
-    from jisho_subs.metadata import detect_language, parse_directory
+    from shiroikuma_subtitles.metadata import detect_language, parse_directory
     info = parse_directory("Lázár, Nelio Biedermann -- [197] (2026) 小説")
     assert detect_language(info, ["001_111_978.mp3"],
                            [{"title": "Kapitel 1 - Lázár"}]) == "de"
@@ -1238,25 +1311,25 @@ def test_a_genre_tag_does_not_decide_the_language():
 
 def test_publisher_boilerplate_does_not_decide_the_language():
     """"Opening Credits" appears in the tags of German audiobooks too."""
-    from jisho_subs.metadata import guess_language
+    from shiroikuma_subtitles.metadata import guess_language
     assert guess_language(["Also sprach Zarathustra", "Friedrich Nietzsche",
                            "Opening Credits"]) == "de"
 
 
 def test_diacritics_shared_across_languages_prove_nothing():
     """"Lázár" is a Hungarian name; á must not imply Czech."""
-    from jisho_subs.metadata import guess_language
+    from shiroikuma_subtitles.metadata import guess_language
     assert guess_language(["Lázár", "Nelio Biedermann"]) != "cs"
 
 
 def test_no_evidence_means_no_guess():
-    from jisho_subs.metadata import guess_language
+    from shiroikuma_subtitles.metadata import guess_language
     assert guess_language(["MMA"]) is None
     assert guess_language([""]) is None
 
 
 def test_a_stated_language_always_wins():
-    from jisho_subs.metadata import detect_language, parse_directory
+    from shiroikuma_subtitles.metadata import detect_language, parse_directory
     info = parse_directory("Empuzjon, Olga Tokarczuk -- [197][942] (2022)")
     assert detect_language(info, ["第1章.mp3"], []) == "pl"
 
@@ -1283,8 +1356,8 @@ def _book_dir(tmp_path, name, tracks=2, srt=False, m4b=False, epub=False):
     return str(d)
 
 
-def test_a_folder_of_mp3s_is_a_book_that_needs_converting(tmp_path):
-    from jisho_subs.plan import FROM_NOTHING, classify, inspect
+def test_a_directory_of_mp3s_is_a_book_that_needs_converting(tmp_path):
+    from shiroikuma_subtitles.plan import FROM_NOTHING, classify, inspect
     d = _book_dir(tmp_path, "bare", tracks=3)
     assert classify(d) == "book"
     plan = inspect(d)
@@ -1293,21 +1366,21 @@ def test_a_folder_of_mp3s_is_a_book_that_needs_converting(tmp_path):
 
 
 def test_mp3s_with_subtitles_use_those_as_the_reference(tmp_path):
-    from jisho_subs.plan import FROM_SRT, inspect
+    from shiroikuma_subtitles.plan import FROM_SRT, inspect
     plan = inspect(_book_dir(tmp_path, "subbed", tracks=3, srt=True))
     assert plan.reference == FROM_SRT and plan.subtitles == 3
     assert plan.action == "convert + subtitles"
 
 
 def test_an_already_converted_book_needs_nothing(tmp_path):
-    from jisho_subs.plan import inspect
+    from shiroikuma_subtitles.plan import inspect
     plan = inspect(_book_dir(tmp_path, "done", tracks=2, srt=True, m4b=True))
     assert plan.to_convert == 0 and plan.action == "nothing to do"
     assert not plan.busy
 
 
-def test_a_folder_of_books_is_a_library(tmp_path):
-    from jisho_subs.plan import classify, survey
+def test_a_directory_of_books_is_a_library(tmp_path):
+    from shiroikuma_subtitles.plan import classify, survey
     root = tmp_path / "library"
     _book_dir(root, "one", tracks=1)
     _book_dir(root, "two", tracks=1, srt=True)
@@ -1320,13 +1393,13 @@ def test_a_folder_of_books_is_a_library(tmp_path):
 
 
 def test_an_epub_makes_it_a_book_not_a_library(tmp_path):
-    from jisho_subs.plan import classify
+    from shiroikuma_subtitles.plan import classify
     d = _book_dir(tmp_path, "withbook", tracks=1, epub=True)
     assert classify(d) == "book"
 
 
 def test_reading_cues_back_out_of_an_srt(tmp_path):
-    from jisho_subs.srt import read_cues
+    from shiroikuma_subtitles.srt import read_cues
     p = tmp_path / "a.srt"
     p.write_text("1\n00:00:01,000 --> 00:00:02,000\nErster Satz.\n\n"
                  "2\n00:00:02,500 --> 00:00:04,000\nZweiter\nSatz.\n",
@@ -1335,7 +1408,7 @@ def test_reading_cues_back_out_of_an_srt(tmp_path):
 
 
 def test_a_byte_order_mark_does_not_leak_into_the_first_cue(tmp_path):
-    from jisho_subs.srt import read_cues
+    from shiroikuma_subtitles.srt import read_cues
     p = tmp_path / "b.srt"
     p.write_bytes("﻿1\n00:00:01,000 --> 00:00:02,000\nSatz.\n".encode("utf-8"))
     assert read_cues(str(p)) == ["Satz."]
@@ -1344,7 +1417,7 @@ def test_a_byte_order_mark_does_not_leak_into_the_first_cue(tmp_path):
 # -- the untagged head is what identifies the language -------------------
 
 def test_only_the_part_before_the_separator_is_read():
-    from jisho_subs.metadata import before_tags
+    from shiroikuma_subtitles.metadata import before_tags
     assert before_tags("Lázár, Nelio Biedermann -- [197] (2026) 小説") \
         == "Lázár, Nelio Biedermann"
     assert before_tags("Akademia Pana Kleksa, Jan Brzechwa -- [197] (1946).m4a") \
@@ -1356,34 +1429,34 @@ def test_only_the_part_before_the_separator_is_read():
 
 def test_the_head_carries_text_the_parsing_discards():
     """A subtitle is dropped from `book`, but still identifies the language."""
-    from jisho_subs.metadata import detect_language, parse_directory
+    from shiroikuma_subtitles.metadata import detect_language, parse_directory
     name = "Prowadź swój pług przez kości umarłych, Olga Tokarczuk -- [197] (2009)"
     assert detect_language(parse_directory(name)) == "pl"
 
 
 def test_a_japanese_genre_tag_is_not_read():
-    from jisho_subs.metadata import detect_language, parse_directory
+    from shiroikuma_subtitles.metadata import detect_language, parse_directory
     assert detect_language(parse_directory(
         "Erfolg, Lion Feuchtwanger -- [197] (1930) 小説")) != "ja"
 
 
 def test_an_initial_is_not_a_word():
     """"Timothy W. Ryback" scored Polish for its middle initial and tied."""
-    from jisho_subs.metadata import guess_language
+    from shiroikuma_subtitles.metadata import guess_language
     assert guess_language(["Takeover, Hitler's final rise to power, "
                            "Timothy W. Ryback"]) == "en"
 
 
 def test_cjk_punctuation_in_a_mangled_german_name_is_not_japanese():
     """`Erw・ungen` is a broken `Erwägungen`; U+30FB is punctuation, not kana."""
-    from jisho_subs.metadata import guess_language
+    from shiroikuma_subtitles.metadata import guess_language
     assert guess_language(["Zauberberg, der, Thomas Mann",
                            "01_0301 Zweifel und Erw・ungen",
                            "Der Zauberberg"]) == "de"
 
 
 def test_english_words_that_are_also_german_are_not_used():
-    from jisho_subs.metadata import _WORDS
+    from shiroikuma_subtitles.metadata import _WORDS
     for word in ("in", "an", "all", "her", "was", "will", "man", "die", "wie"):
         assert word not in _WORDS["en"], f"{word!r} is ambiguous"
 
@@ -1391,7 +1464,7 @@ def test_english_words_that_are_also_german_are_not_used():
 # -- looking a title up in a real dictionary -----------------------------
 
 def _needs_dictionaries(*languages):
-    from jisho_subs import dictionaries
+    from shiroikuma_subtitles import dictionaries
     have = dictionaries.available()
     missing = [l for l in languages if l not in have]
     if missing:
@@ -1400,7 +1473,7 @@ def _needs_dictionaries(*languages):
 
 def test_dictionaries_are_optional():
     """A machine without hunspell must still run, just with fewer answers."""
-    from jisho_subs import dictionaries
+    from shiroikuma_subtitles import dictionaries
     assert isinstance(dictionaries.available(), tuple)
     assert dictionaries.score([], ()) == {}
     assert dictionaries.best([]) is None
@@ -1409,7 +1482,7 @@ def test_dictionaries_are_optional():
 def test_a_plain_english_title_is_recognised():
     """No diacritic, no distinctive script, no function word — only a lookup."""
     _needs_dictionaries("en", "de", "pl", "cs")
-    from jisho_subs.metadata import detect_language, parse_directory
+    from shiroikuma_subtitles.metadata import detect_language, parse_directory
     for name in ("Beyond Order, Jordan B. Peterson -- [197] (2021)",
                  "Right thing, right now, Ryan Holiday -- [197] (2024)",
                  "Nineteen eighty-four, George Orwell, Simon Prebble -- [197]"):
@@ -1418,7 +1491,7 @@ def test_a_plain_english_title_is_recognised():
 
 def test_the_dictionary_does_not_override_a_stated_language():
     _needs_dictionaries("en")
-    from jisho_subs.metadata import detect_language, parse_directory
+    from shiroikuma_subtitles.metadata import detect_language, parse_directory
     info = parse_directory("Empuzjon, Olga Tokarczuk -- [197][942] (2022)")
     assert detect_language(info) == "pl"
 
@@ -1426,7 +1499,7 @@ def test_the_dictionary_does_not_override_a_stated_language():
 def test_the_dictionary_does_not_override_the_rules():
     """Script and diacritics decide first; the lookup only fills the gaps."""
     _needs_dictionaries("en", "de")
-    from jisho_subs.metadata import detect_language, parse_directory
+    from shiroikuma_subtitles.metadata import detect_language, parse_directory
     assert detect_language(parse_directory(
         "羅生門, 芥川龍之介 -- [197] (1915)")) == "ja"
     assert detect_language(parse_directory(
@@ -1436,13 +1509,13 @@ def test_the_dictionary_does_not_override_the_rules():
 def test_short_words_are_not_looked_up():
     """Three-letter tokens match everywhere; "MMA" scored Polish 1.00."""
     _needs_dictionaries("pl")
-    from jisho_subs.metadata import detect_language, parse_directory
+    from shiroikuma_subtitles.metadata import detect_language, parse_directory
     assert detect_language(parse_directory("MMA")) is None
 
 
 def test_a_near_tie_is_not_an_answer():
     _needs_dictionaries("en", "de", "cs")
-    from jisho_subs.metadata import detect_language, parse_directory
+    from shiroikuma_subtitles.metadata import detect_language, parse_directory
     # "Meditations" is recognised by English, German and Czech alike.
     assert detect_language(parse_directory("Meditations 3 (180) Marcus Aurelius")) \
         is None
@@ -1451,7 +1524,7 @@ def test_a_near_tie_is_not_an_answer():
 def test_dictionary_encodings_are_handled():
     """The German and Polish dictionaries are ISO-8859, not UTF-8."""
     _needs_dictionaries("de", "pl")
-    from jisho_subs import dictionaries
+    from shiroikuma_subtitles import dictionaries
     german = dictionaries.words_for("de")
     polish = dictionaries.words_for("pl")
     assert len(german) > 100000 and len(polish) > 100000

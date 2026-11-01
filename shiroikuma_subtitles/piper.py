@@ -46,7 +46,7 @@ import numpy as np
 from .voicevox import EngineError, Style, Wav, read_wav
 
 #: Where downloaded voices live, beside the VOICEVOX engine.
-VOICE_DIR = "~/.cache/jisho-subs/piper-voices"
+VOICE_DIR = "~/.cache/subtitles/piper-voices"
 
 #: One default per language.  Chosen by ear, not by benchmark — no German TTS
 #: quality benchmark exists (voicearena's German table reads "No models yet for
