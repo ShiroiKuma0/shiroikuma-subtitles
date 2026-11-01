@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.12.1 - description
+* subtitles - version 1.13.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -170,6 +170,13 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   dir's parent =/tmp/subtitles/models=.
 
 * Changelog
+** 1.13.0
+*** 2026-10-31_23-54-41 UTC (日曜日)
+**** Cross-check: a re-decoded line is taken only when it brings in the name or the number the original has and the line lacks. A LaBSE gain is noise at line length (Terminator 2: a change of punctuation +0.17, 大式 → 大好き +0.13, the genuine 逃亡を図って +0.04) and an audio far surer of a text is no better (鎌は → ママは Δ +9.61); every right acceptance on Terminator 1 and 2 brought a name or a number. The rest stay listed with their candidates.
+**** Cross-check: candidates are scored in context, between the neighbouring sentences over their audio. A candidate decoded on the line's own window is Whisper's best for exactly that window and won by construction (Terminator, 40:13: 君に知られては困る → 君に死なるとは困る, Δ +1.45).
+**** Cross-check: names are paired one-to-one — the best-sounding name takes a katakana word, shared only between names that sound alike (Ford no longer claimed ブロードウェイ, Katherine コナー) — and a name span may replace only about as much text as the name (24:14: もう待った → もうマット, not マット).
+**** Cross-check: meaning and numbers are checked against the original's lines the sentence covers for at least 30 % of their length, not every line it touches; a number inside a code (10-4, 0-6-0) is no number; the meaning threshold is 0.20. A long suspect is also decoded in two halves, cut at its longest pause.
+**** The review lists the suspects worth a listen (a name or number missing, or a candidate within 3) apart from the lines merely far in meaning, one line each.
 ** 1.12.1
 *** 2026-10-31_21-48-08 UTC (土曜日)
 **** -M carries the replaced SRT's track name and default flag over to the new track (Terminator 2's 日本語, default, came out nameless and not default).
@@ -1637,15 +1644,24 @@ from MeCab); for other languages the stage is skipped.
    both, so the film's names are not penalised for being foreign.  A
    name span is taken when it scores at least =XC_NAME_MARGIN= against
    the current text; a re-decoded line only when it scores better by
-   =XC_MARGIN= *and* says more of what the original says (the name, the
-   number, or a LaBSE score higher by =XC_SIM_GAIN=).
+   =XC_MARGIN= *and* brings in the name or the number the original has
+   and the line lacks.
+
+   Nothing weaker is taken, and both weaker rules were tried.  A LaBSE
+   gain is noise at this length: on Terminator 2 a change of punctuation
+   alone gained +0.17 and 大式 → 大好き +0.13, while the genuine 頭部を測って
+   → 逃亡を図って gained +0.04.  Nor is an audio far surer of the new text
+   enough: 鎌は → ママは (Δ +9.61), 来て → していけないんだに (Δ +5.02) and a
+   ダイソーさん the names prompt put into a line (Δ +8.18) all passed that
+   way.  Every acceptance on Terminator 1 and 2 that was right brought a
+   name or a number; the rest stay listed as candidates to listen to.
 
 Everything taken is listed in the review, before and after, with the
 scores; suspects nothing resolved are listed apart, with the original's
 line, for a person to listen to — and a confirmed fix goes into the
 corrections file.  Results are cached per line in the work dir.
 #+begin_src python
-XC_SIM, XC_SIM_GAIN = 0.30, 0.05      # LaBSE: below this a line is suspect; a re-decoded line must gain this much
+XC_SIM = 0.20                         # LaBSE: below this a line is suspect
 XC_NAME_SIM = 0.67                    # skeleton similarity of a span's reading to a name
 XC_NAME_MARGIN, XC_MARGIN = 0.0, 0.5  # forced-decoding log-probability: name span vs current, re-decoded line vs current
 HOMOGLYPH = str.maketrans("АВЕКМНОРСТХаеорсухіјѕԁԛԝ", "ABEKMHOPCTXaeopcyxijsdqw")
@@ -1702,15 +1718,20 @@ def english_under(cue, check, before=1.0, after=0.5):
 
 def name_map(cues, check, names):
     """{English name: the dub's katakana for it}, learnt from the lines that carry both"""
-    out = {}
+    pairs = []
     for nm in names:
-        co, seen = {}, 0
+        co = {}
         for c in cues:
             if not any(re.search(r"\b%s\b" % nm, e) for e in english_under(c, check)): continue
-            seen += 1
             for k in set(re.findall(KATA_RE, c["text"].replace("・", " "))): co[k] = co.get(k, 0) + 1
-        best = [(n, k) for k, n in co.items() if n >= 2 and sound_sim(nm, k) >= 0.6]
-        if best: out[nm] = max(best)[1]
+        pairs += [(sound_sim(nm, k), n, nm, k) for k, n in co.items() if n >= 2 and sound_sim(nm, k) >= 0.6]
+    # one katakana word, one name: the best-sounding pair wins it (Broadway, not Ford, gets ブロードウェイ; Connor, not
+    # Katherine, gets コナー) — shared only between variants of one name (Kate/Katie, Terminator/Terminators)
+    out = {}
+    for sim, n, nm, k in sorted(pairs, reverse=True):
+        if nm in out: continue
+        if any(v == k and sound_sim(o, nm) < 0.8 for o, v in out.items()): continue
+        out[nm] = k
     return out
 
 def name_spans(text, k):
@@ -1741,7 +1762,21 @@ def numbers_ja(t):
         if all(ch in KANJI_NUM for ch in run): out.add(int("".join(str(KANJI_NUM[c]) for c in run)))
     return out
 
-def numbers_en(t): return {int(m) for m in re.findall(r"\b\d{2,}\b", t.replace(",", ""))}
+def numbers_en(t): return {int(m) for m in re.findall(r"(?<![\w-])\d{2,}(?![\w-])", t.replace(",", ""))}   # not 10-4, R31, 60th
+
+def english_core(cue, check):
+    """the original's lines this one translates: those it overlaps for at least 30 % of their length"""
+    return [unhomoglyph(re.sub(r"<[^>]+>", "", t)).replace("\n", " ") for s, e, t in check
+            if min(e, cue["end"]) - max(s, cue["start"]) >= 0.3 * max(0.1, e - s)]
+
+def halves(c, words):
+    """-> the cut time inside a line: the longest pause between its words in the middle 30–70 %, or None"""
+    a, b = c["start"], c["end"]
+    if b - a < 2.5: return None
+    ws = [w for w in words if a - 0.2 <= w["start"] and w["end"] <= b + 0.2]
+    gaps = [(n["start"] - p["end"], (p["end"] + n["start"]) / 2) for p, n in zip(ws, ws[1:])
+            if a + 0.3 * (b - a) <= (p["end"] + n["start"]) / 2 <= a + 0.7 * (b - a)]
+    return max(gaps)[1] if gaps else a + (b - a) / 2
 
 class Scorer:
     """forced decoding: log-probability of a given text for an audio window, after a prompt"""
@@ -1769,11 +1804,25 @@ class Scorer:
                                   initial_prompt=prompt, condition_on_previous_text=False, fp16=True, beam_size=5, best_of=5)
         return r["text"].strip()
 
+def context(sents, i, before=2.5, after=1.5, longest=26.0):
+    """-> (start, end, text before, text after): the line's window widened to the neighbours spoken within reach"""
+    c = sents[i]; a, b = c["start"], c["end"]; pre = post = ""
+    for k in range(i - 1, -1, -1):
+        p = sents[k]
+        if p["end"] < c["start"] - before or b - p["start"] > longest: break
+        a = p["start"]; pre = p["text"] + pre
+    for k in range(i + 1, len(sents)):
+        n = sents[k]
+        if n["start"] > c["end"] + after or n["end"] - a > longest: break
+        b = n["end"]; post += n["text"]
+    strip = lambda t: re.sub(r"[、。，．,.!?！？…\s]", "", t)
+    return a, b, strip(pre), strip(post)
+
 def bare(t, cfg):
     t = re.sub(r"[、。，．,.!?！？…\s]" if not cfg["spaces"] else r"[,.!?…]", "", t)
     return t.strip()
 
-def cross_check(sents, check, x, sr, cfg, lang, model_name, cache_path, given_names=()):
+def cross_check(sents, check, x, sr, cfg, lang, model_name, cache_path, given_names=(), segs=None):
     """correct sents in place; -> dict(names, fixes, suspects)"""
     rep = dict(names={}, fixes=[], suspects=[])
     if lang != "ja" or not check or tagger() is None: return rep
@@ -1785,25 +1834,28 @@ def cross_check(sents, check, x, sr, cfg, lang, model_name, cache_path, given_na
           % (len(names), ", ".join("%s=%s" % kv for kv in sorted(names.items()))), flush=True)
     from sentence_transformers import SentenceTransformer
     emb = SentenceTransformer("sentence-transformers/LaBSE", device="cuda")
-    ens = [" ".join(english_under(c, check)) for c in sents]
+    ens = [" ".join(english_under(c, check)) for c in sents]           # names: the dub may lag its original
+    cores = [" ".join(english_core(c, check)) for c in sents]          # meaning and numbers: the lines it translates
+    words = sorted((w for seg in segs for w in seg["words"] if w["w"].strip()), key=lambda w: w["start"]) if segs else []
     def sims(jas, en):
         if not en.strip(): return [1.0] * len(jas)
         v = emb.encode(jas + [en], normalize_embeddings=True); return [float(v[k] @ v[-1]) for k in range(len(jas))]
-    base = [sims([c["text"]], e)[0] for c, e in zip(sents, ens)]
+    base = [sims([c["text"]], e)[0] for c, e in zip(sents, cores)]
     todo = []
     for i, c in enumerate(sents):
         en = ens[i]; why = []
         missing = [k for nm, k in names.items() if re.search(r"\b%s\b" % nm, en) and k not in c["text"]]
         spans = [(k, sp) for k in missing for sp in name_spans(c["text"], k)]
         if missing: why.append("name " + "/".join(missing))
-        if numbers_en(en) - numbers_ja(c["text"]): why.append("number " + "/".join(str(v) for v in sorted(numbers_en(en) - numbers_ja(c["text"]))))
-        if en.strip() and base[i] < XC_SIM: why.append("meaning %.2f" % base[i])
+        core = cores[i]
+        if numbers_en(core) - numbers_ja(c["text"]): why.append("number " + "/".join(str(v) for v in sorted(numbers_en(core) - numbers_ja(c["text"]))))
+        if core.strip() and base[i] < XC_SIM: why.append("meaning %.2f" % base[i])
         if why: todo.append((i, why, missing, spans))
     model = load_model(model_name) if todo else None
     sc = Scorer(model, x, sr, lang, prompt) if model else None
     prog = Progress("cross-check line", len(todo)) if todo else None
     for n_, (i, why, missing, spans) in enumerate(todo):
-        c = sents[i]; key = "%.2f-%.2f|%s" % (c["start"], c["end"], c["text"])
+        c = sents[i]; key = "v3|%.2f-%.2f|%s" % (c["start"], c["end"], c["text"])
         if key not in cache:
             cands = []
             for k, (sim, surf) in spans:
@@ -1813,18 +1865,32 @@ def cross_check(sents, check, x, sr, cfg, lang, model_name, cache_path, given_na
                 if t and t != c["text"] and difflib.SequenceMatcher(None, bare(t, cfg), bare(c["text"], cfg)).ratio() >= 0.4 \
                         and 0.6 <= len(bare(t, cfg)) / max(1, len(bare(c["text"], cfg))) <= 1.6:
                     cands.append(("decode", t))
+            cut = halves(c, words) if "\n" not in c["text"] else None
+            if cut is not None:
+                # a line decoded whole can repeat its mishearing every time (過労死で); each half on its own window
+                # hears it afresh (かろうじて), and the two halves joined are one more candidate
+                t = (sc.decode(c["start"], cut, prompt) + sc.decode(cut, c["end"], prompt)).rstrip(cfg["strip_end"])
+                if t and bare(t, cfg) != bare(c["text"], cfg) and difflib.SequenceMatcher(None, bare(t, cfg), bare(c["text"], cfg)).ratio() >= 0.4 \
+                        and 0.6 <= len(bare(t, cfg)) / max(1, len(bare(c["text"], cfg))) <= 1.6:
+                    cands.append(("halves", t))
             cands = list(dict.fromkeys(cands))
-            lps = sc.score(c["start"], c["end"], [bare(c["text"], cfg)] + [bare(t, cfg) for _, t in cands])
+            # scored in context: a candidate decoded on this line's own window is Whisper's best for exactly that window,
+            # so scoring it there favours it by construction (Terminator, 40:13: 知られては → 死なるとは, Δ +1.45);
+            # embedded between its neighbours and scored over their audio, both texts compete on equal terms
+            a_, b_, pre, post = context(sents, i)
+            lps = sc.score(a_, b_, [pre + bare(c["text"], cfg) + post] + [pre + bare(t, cfg) + post for _, t in cands])
             cache[key] = dict(cur=lps[0], cands=[[kind, t, lp] for (kind, t), lp in zip(cands, lps[1:])])
         r = cache[key]; best = None
         for kind, t, lp in r["cands"]:
             gain = lp - r["cur"]
             if kind == "name":
-                ok = gain >= XC_NAME_MARGIN
+                # the name must take the place of about as much text as it is: a span swallowing a word besides
+                # (Terminator, 24:14: もう待った → マット, Δ +1.43) wins only because fewer tokens score better
+                ok = gain >= XC_NAME_MARGIN and len(bare(t, cfg)) >= len(bare(c["text"], cfg)) - 1
             else:
-                better = any(k in t for k in missing) or (numbers_en(ens[i]) & (numbers_ja(t) - numbers_ja(c["text"]))) \
-                         or sims([t], ens[i])[0] >= base[i] + XC_SIM_GAIN
-                ok = gain >= XC_MARGIN and bool(better)
+                # only the original's own word for it counts: the name it says, or the number (see above)
+                brings = [k for k in missing if k in t] or (numbers_en(cores[i]) & (numbers_ja(t) - numbers_ja(c["text"])))
+                ok = gain >= XC_MARGIN and bool(brings)
             if ok and (best is None or lp > best[2]): best = (kind, t, lp)
         if best:
             rep["fixes"].append((c["start"], c["end"], c["text"], best[1], best[0], best[2] - r["cur"], ", ".join(why), ens[i]))
@@ -1919,7 +1985,7 @@ def write_report(path, cues, vad, used, dropped, ref_count, check=(), check_note
         if check: f.write("check against %s: %d of %d speech cues without a line (%.1f%%)%s\n" % (check_note, len(still), len(check), 100*len(still)/len(check), "  <- MORE THAN %d%%: SEE BELOW" % round(100*CHECK_WARN) if len(still) > CHECK_WARN*len(check) else ""))
         else: f.write("check: no check track, the coverage of the dialogue is unverified\n")
         xc = used.get("crosscheck")
-        if xc is not None: f.write("cross-check against the original: %d lines corrected by the audio, %d suspects left to listen to\n" % (len(xc["fixes"]), len(xc["suspects"])))
+        if xc is not None: f.write("cross-check against the original: %d lines corrected by the audio, %d suspects worth a listen, %d far in meaning\n" % (len(xc["fixes"]), sum(1 for x in xc["suspects"] if "name" in x[3] or "number" in x[3] or any(g >= -3 for _, g in x[5])), sum(1 for x in xc["suspects"] if not ("name" in x[3] or "number" in x[3] or any(g >= -3 for _, g in x[5])))))
         f.write("regions from the prompted pass: %d, from the unprompted pass: %d\n" % (used["prompt"], used["noprompt"]))
         f.write("VAD speech >= 0.8 s without a subtitle: %d chunks, %.1f min\n\n" % (len(miss), sum(e-s for s, e in miss)/60))
         for s, e in miss: f.write("   %s - %s (%.1f s)\n" % (hms(s), hms(e), e-s))
@@ -1941,10 +2007,15 @@ def write_report(path, cues, vad, used, dropped, ref_count, check=(), check_note
             f.write("\nCross-check, lines corrected (the audio scored the new text at least as well; Δ = log-probability gain): %d\n\n" % len(xc["fixes"]))
             for s, e, old, new, kind, gain, why, en in xc["fixes"]:
                 f.write("%s --> %s  [%s, Δ %+.2f, %s]\n    %s\n => %s\n    EN: %s\n" % (fmt_time(s), fmt_time(e), kind, gain, why, old, new, en))
-            f.write("\nCross-check, suspects the audio did not resolve (listen; a confirmed fix goes into the corrections file): %d\n\n" % len(xc["suspects"]))
-            for s, e, t, why, en, cands in xc["suspects"]:
+            # worth a listen: a missing name or number, or a candidate the audio nearly took; the rest is mostly the dub paraphrasing
+            near = lambda x: "name" in x[3] or "number" in x[3] or any(g >= -3 for _, g in x[5])
+            top = [x for x in xc["suspects"] if near(x)]; rest = [x for x in xc["suspects"] if not near(x)]
+            f.write("\nCross-check, suspects worth a listen — a name or number missing, or a candidate within 3 of the current text (a confirmed fix goes into the corrections file): %d\n\n" % len(top))
+            for s, e, t, why, en, cands in top:
                 f.write("%s --> %s  [%s]\n    %s\n    EN: %s\n" % (fmt_time(s), fmt_time(e), why, t, en))
                 for ct, g in cands: f.write("    ?  %s  (Δ %+.2f)\n" % (ct, g))
+            f.write("\nCross-check, other lines far in meaning from the original (usually the dub paraphrasing): %d\n\n" % len(rest))
+            for s, e, t, why, en, cands in rest: f.write("%s  [%s]  %s  |  EN: %s\n" % (fmt_time(s), why, t, en))
         reps = used.get("repairs", [])
         f.write("\nSegments where Whisper skipped speech, re-transcribed: %d (repaired %d)\n\n" % (len(reps), sum(1 for r in reps if r[4])))
         for s, e, old, new, ok in reps: f.write("%s --> %s  [%s]  %s  =>  %s\n" % (fmt_time(s), fmt_time(e), "repaired" if ok else "kept", old, new))
@@ -2354,7 +2425,7 @@ def cmd_run(a):
         print("  whole sentences: %d cues -> %d sentences" % (len(out), len(sents)), flush=True)
     else:
         sents = [dict(start=s, end=e, text=t, logprob=lp, multi=m) for s, e, t, lp, m in out]
-    used["crosscheck"] = cross_check(sents, check, x, sr, cfg, a.lang, a.model, os.path.join(a.work, "crosscheck.json"), list(names)) \
+    used["crosscheck"] = cross_check(sents, check, x, sr, cfg, a.lang, a.model, os.path.join(a.work, "crosscheck.json"), list(names), merged) \
         if a.crosscheck and check else None
     out = [(c["start"], c["end"], wrap_lines(c["text"], cfg) if a.group == "sentence" else c["text"], c["logprob"], c.get("multi", False)) for c in sents]
     write_srt(a.out, [(s, e, t) for s, e, t, _, _ in out])
