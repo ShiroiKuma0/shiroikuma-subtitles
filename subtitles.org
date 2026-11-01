@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 2.0.0 - description
+* subtitles - version 2.1.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -201,6 +201,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   into the Hugging Face cache; the ECAPA speaker model (80 MB) into
   =/tmp/subtitles/models=.
 * Changelog
+** 2.1.0
+*** 2026-11-01_14-00-00 UTC (日曜日)
+**** Repeated lines: neighbouring cues with the same text less than 500 ms apart — which shiroikuma-jisho merges into one, dropping an utterance of a real repeat (急げ! 急げ!) and hiding Whisper repeating itself — are now one cue, the line written as many times as Whisper's words show it believably spoken (Terminator 2, 1:42:25: 急げ!急げ!急げ!). A line heard fewer times than written is listed in the review and in the review subtitles (Terminator 6, 9:07: お腹の後ろの医者に出席したから, written twice, its first copy's words timed at one instant). The review subtitles no longer hold identical neighbours either.
 ** 2.0.0
 *** 2026-11-01_12-00-00 UTC (日曜日)
 **** One tool, =subtitles=, with subcommands: =epub= (the book tool, formerly =shiroikuma-jisho-subtitles=, from its own repository), =mkv= (this film tool, formerly =subtitles.sh=), =lint=, and =-s= to set up or check the machine for both; =subtitles= alone lists them. The repository is =shiroikuma-subtitles=, and this file sits in its root.
@@ -332,7 +335,7 @@ extras =subtitles -s= installs.
 # Tangled from subtitles.org in ~/git/shiroikuma-subtitles.  Edit that, never
 # this file: the next tangle overwrites it.
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 VENV="${SUBTITLES_VENV:-$HOME/venv.shiroikuma-subtitles}"
 REPO="${SUBTITLES_REPO:-$HOME/git/shiroikuma-subtitles}"
 GITURL="https://github.com/ShiroiKuma0/shiroikuma-subtitles"
@@ -2637,6 +2640,76 @@ def wrap_lines(t, cfg):
     e = [0] + min(fin)[1] + [len(t)]
     return "\n".join(t[a:b].strip() for a, b in zip(e, e[1:]))
 #+end_src
+*** Repeated lines
+shiroikuma-jisho merges neighbouring cues whose text is identical and
+which are less than 500 ms apart, so a line written twice is shown
+once.  Two different things produce such a pair, and the merge is
+wrong for both.  A real repeat — 急げ! 急げ!, a name called twice — loses
+an utterance: the app shows one 急げ! over two.  And Whisper repeating
+itself — the same words written twice over one utterance — is hidden
+by the merge instead of being found (Terminator 6, 9:07: お腹の後ろの医者に
+出席したから twice, the first copy's words all timed at one instant;
+Terminator, 1:01:05: Dream three times in 0.7 s).  Measured over the
+seven films of the first lint: 60 such pairs; six of the eight Mission:
+Impossible tracks had them too.
+
+Whisper's own words tell the two apart.  Each copy of the line is
+looked for among the words under the run, and a copy counts as heard
+only when it is believable speech: it lasts =REPEAT_MIN= or more, it
+is no faster than the language's =max_rate=, at most half its words
+are timed at an instant (shorter than =REPEAT_INSTANT=), and it starts
+after the copy before it has ended (two segments hearing the same
+audio overlap: そうだ at 3259.11–3259.91 and again at 3259.53–3259.83).
+A run is then one cue, its line written as many times as it was
+heard; when fewer copies were heard than written, the run is listed
+in the review and in the review subtitles to be listened to.  When
+the words hold no copy at all — a correction of the cross-check
+changed the text — there is no evidence, and every copy is kept.
+#+begin_src python
+REPEAT_GAP, REPEAT_MIN, REPEAT_INSTANT = 0.5, 0.1, 0.03
+
+def heard_copies(text, words, s, e, cfg):
+    """how many believable utterances of text Whisper's words show between s and e; None when none is found at all"""
+    key = strip_punct(text).replace("-", "")
+    ws = sorted((w for w in words if w["end"] > s - 0.3 and w["start"] < e + 0.3), key=lambda w: w["start"])
+    chars, owner = [], []
+    for k, w in enumerate(ws):
+        for ch in strip_punct(w["w"]).replace("-", ""): chars.append(ch); owner.append(k)
+    flat = "".join(chars)
+    if not key: return None
+    found, pos, last_end = 0, flat.find(key), None
+    if pos < 0: return None
+    while pos >= 0:
+        i0, i1 = owner[pos], owner[pos + len(key) - 1]
+        t0, t1 = ws[i0]["start"], ws[i1]["end"]
+        inst = sum(1 for w in ws[i0:i1 + 1] if w["end"] - w["start"] < REPEAT_INSTANT)
+        if t1 - t0 >= REPEAT_MIN and len(key) / (t1 - t0) <= cfg["max_rate"] and 2 * inst <= i1 - i0 + 1 \
+           and (last_end is None or t0 >= last_end - 0.1):
+            found += 1; last_end = t1
+        pos = flat.find(key, pos + len(key))
+    return found
+
+def join_repeats(out, segs, cfg, wrap):
+    """runs of identical neighbouring cues closer than REPEAT_GAP -> one cue each; returns (cues, joined, suspects)"""
+    words = [w for sg in segs for w in sg["words"] if w["w"].strip()]
+    key = lambda t: re.sub(r"\s", "", t)
+    res, joined, suspects, i = [], 0, [], 0
+    while i < len(out):
+        j = i
+        while j + 1 < len(out) and key(out[j + 1][2]) == key(out[i][2]) and out[j + 1][0] - out[j][1] < REPEAT_GAP: j += 1
+        if j == i: res.append(out[i]); i += 1; continue
+        run = out[i:j + 1]; k = len(run); s, e = run[0][0], run[-1][1]
+        m = heard_copies(run[0][2], words, s, e, cfg)
+        n = k if m is None else max(1, min(m, k))
+        line = run[0][2].replace("\n", " " if cfg["spaces"] else "")
+        glue = (" " if cfg["spaces"] else "") if line and line[-1] in cfg["punct_end"] + "…" + cfg["sep"].strip() else cfg["sep"]
+        text = glue.join([line] * n) if not run[0][2].startswith(cfg["dash"]) else "\n".join([run[0][2]] * n)
+        res.append((s, e, run[0][2] if n == 1 else text if "\n" in text else wrap(text), sum(c[3] for c in run) / k, any(c[4] for c in run)))
+        joined += 1
+        if m is not None and m < k: suspects.append((s, e, line, k, m))
+        i = j + 1
+    return res, joined, suspects
+#+end_src
 *** Cross-check against the original's subtitles
 Whisper writes what a word sounds like, and a dub is full of words that
 sound like other words: Terminator, 1:26–1:31, Sarah calls カイル and the
@@ -3051,6 +3124,9 @@ def write_report(path, cues, vad, used, dropped, ref_count, check=(), check_note
                 for ct, g in cands: f.write("    ?  %s  (Δ %+.2f)\n" % (ct, g))
             f.write("\nCross-check, other lines far in meaning from the original (usually the dub paraphrasing): %d\n\n" % len(rest))
             for s, e, t, why, en, cands in rest: f.write("%s  [%s]  %s  |  EN: %s\n" % (fmt_time(s), why, t, en))
+        rp = used.get("repeats", [])
+        f.write("\nRepeated lines heard fewer times than written (made one cue; Whisper repeating itself? listen): %d\n\n" % len(rp))
+        for s, e, t, k, m in rp: f.write("%s --> %s  [written %d, heard %d]  %s\n" % (fmt_time(s), fmt_time(e), k, m, t))
         reps = used.get("repairs", [])
         f.write("\nSegments where Whisper skipped speech, re-transcribed: %d (repaired %d)\n\n" % (len(reps), sum(1 for r in reps if r[4])))
         for s, e, old, new, ok in reps: f.write("%s --> %s  [%s]  %s  =>  %s\n" % (fmt_time(s), fmt_time(e), "repaired" if ok else "kept", old, new))
@@ -3076,9 +3152,10 @@ suspect).  The lines merely far in meaning — mostly the dub
 paraphrasing — are left to the text review.  Each cue ends with the
 original's line, cut to a readable length.
 #+begin_src python
-def write_review_srt(path, xc, near):
+def write_review_srt(path, xc, near, repeats=()):
     def en(t): t = re.sub(r"\s+", " ", t).strip(); return "EN: " + (t if len(t) <= 110 else t[:107] + "...")
-    cues = []
+    cues = [(s, e, "[?] %s  (written %d times, heard %d)\nWhisper repeating itself?" % (t, k, m)) for s, e, t, k, m in repeats]
+    xc = xc or dict(fixes=[], suspects=[])
     for s, e, old, new, kind, gain, why, eng in xc["fixes"]:
         cues.append((s, e, "[直] %s\n← %s  (%s, Δ %+.1f)\n%s" % (new.replace("\n", " / "), old.replace("\n", " / "), why, gain, en(eng))))
     for s, e, t, why, eng, cands in xc["suspects"]:
@@ -3086,6 +3163,9 @@ def write_review_srt(path, xc, near):
         best = max(cands, key=lambda c: c[1]) if cands else None
         cues.append((s, e, "[?] %s  (%s)\n%s%s" % (t.replace("\n", " / "), why, "候補: %s  (Δ %+.1f)\n" % (best[0], best[1]) if best else "", en(eng))))
     cues.sort()
+    for k in range(len(cues) - 1, 0, -1):              # the app would merge identical neighbours anyway; do it here
+        if cues[k][2] == cues[k - 1][2] and cues[k][0] - cues[k - 1][1] < REPEAT_GAP:
+            cues[k - 1] = (cues[k - 1][0], max(cues[k - 1][1], cues[k][1]), cues[k][2]); del cues[k]
     for k in range(len(cues) - 1):                     # a player shows overlapping cues stacked; keep them in turn
         if cues[k][1] > cues[k + 1][0]: cues[k] = (cues[k][0], max(cues[k][0] + 0.3, cues[k + 1][0]), cues[k][2])
     write_srt(path, cues)
@@ -3496,10 +3576,12 @@ def cmd_run(a):
     used["crosscheck"] = cross_check(sents, check, x, sr, cfg, a.lang, a.model, os.path.join(a.work, "crosscheck.json"), list(names), merged) \
         if a.crosscheck and check else None
     out = [(c["start"], c["end"], wrap_lines(c["text"], cfg) if a.group == "sentence" else c["text"], c["logprob"], c.get("multi", False)) for c in sents]
+    out, nrep, used["repeats"] = join_repeats(out, merged, cfg, lambda t: wrap_lines(t, cfg))
+    if nrep: print("  repeated lines: %d runs of one line made one cue, %d heard fewer times than written" % (nrep, len(used["repeats"])), flush=True)
     write_srt(a.out, [(s, e, t) for s, e, t, _, _ in out])
     nmiss, nlow, nstill = write_report(a.report, out, vad, used, dropped, len(cues), check, check_note)
-    if a.review_srt and used["crosscheck"] is not None:
-        print("  corrections review: %d cues in %s" % (write_review_srt(a.review_srt, used["crosscheck"], worth_a_listen), a.review_srt), flush=True)
+    if a.review_srt and (used["crosscheck"] is not None or used["repeats"]):
+        print("  corrections review: %d cues in %s" % (write_review_srt(a.review_srt, used["crosscheck"], worth_a_listen, used["repeats"]), a.review_srt), flush=True)
     print("written %s: %d cues; uncovered speech chunks %d; low-confidence lines %d; report %s" % (a.out, len(out), nmiss, nlow, a.report))
     if not check: print("  check: no check track — the coverage of the dialogue is UNVERIFIED")
     else:
