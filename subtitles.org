@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.14.0 - description
+* subtitles - version 1.14.1 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -170,6 +170,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   dir's parent =/tmp/subtitles/models=.
 
 * Changelog
+** 1.14.1
+*** 2026-11-01_10-06-35 UTC (日曜日)
+**** Cross-check: a re-decoded line, like a name span since 1.13.0, may be at most one character shorter than the line it replaces. Forced decoding scores every token, so a line bringing the missing name while dropping a word won by the word (The Matrix, 1:39:37: 頑張れ、モフィアス → モーフィアス, Δ +18.60); such a line now stays a suspect, listed with its candidate.
 ** 1.14.0
 *** 2026-11-01_08-41-34 UTC (日曜日)
 **** The cross-check's corrections and its suspects worth a listen are also written as subtitles beside the input, INPUT-basename.possible-LANG-CORRECTIONS-review.srt, and stay there with -M: a player offers them as one more track, so they are checked by watching, each at its moment with the audio under it. [直] cues show the audio's correction and what it replaced, [?] cues the suspect line, its best untaken candidate and why; each ends with the original's line. The lines merely far in meaning stay in the text review only.
@@ -1648,7 +1651,8 @@ from MeCab); for other languages the stage is skipped.
    name span is taken when it scores at least =XC_NAME_MARGIN= against
    the current text; a re-decoded line only when it scores better by
    =XC_MARGIN= *and* brings in the name or the number the original has
-   and the line lacks.
+   and the line lacks, losing no more than a character of the line on
+   the way.
 
    Nothing weaker is taken, and both weaker rules were tried.  A LaBSE
    gain is noise at this length: on Terminator 2 a change of punctuation
@@ -1891,9 +1895,12 @@ def cross_check(sents, check, x, sr, cfg, lang, model_name, cache_path, given_na
                 # (Terminator, 24:14: もう待った → マット, Δ +1.43) wins only because fewer tokens score better
                 ok = gain >= XC_NAME_MARGIN and len(bare(t, cfg)) >= len(bare(c["text"], cfg)) - 1
             else:
-                # only the original's own word for it counts: the name it says, or the number (see above)
+                # only the original's own word for it counts: the name it says, or the number (see above) — and, as for a
+                # name span, no text lost on the way: forced decoding scores every token, so fewer score better, and a
+                # line that brings the name while dropping a word wins by the word (The Matrix, 1:39:37:
+                # 頑張れ、モフィアス → モーフィアス, Δ +18.60)
                 brings = [k for k in missing if k in t] or (numbers_en(cores[i]) & (numbers_ja(t) - numbers_ja(c["text"])))
-                ok = gain >= XC_MARGIN and bool(brings)
+                ok = gain >= XC_MARGIN and bool(brings) and len(bare(t, cfg)) >= len(bare(c["text"], cfg)) - 1
             if ok and (best is None or lp > best[2]): best = (kind, t, lp)
         if best:
             rep["fixes"].append((c["start"], c["end"], c["text"], best[1], best[0], best[2] - r["cur"], ", ".join(why), ens[i]))
