@@ -170,5 +170,5 @@ matching. Measured: 70 000 × 69 000 tokens in 0.8 s; the Japanese worst case,
 
 ## Licence
 
-The Python package is MIT; `subtitles.org`, and the script it tangles
-into, GPL 3 or later.
+GPL 3 or later — the Python package, `subtitles.org` and the script it
+tangles into alike. See `LICENSE`.
