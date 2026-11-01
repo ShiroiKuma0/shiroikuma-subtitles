@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 1.13.0 - description
+* subtitles - version 1.14.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -170,6 +170,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   dir's parent =/tmp/subtitles/models=.
 
 * Changelog
+** 1.14.0
+*** 2026-11-01_08-41-34 UTC (日曜日)
+**** The cross-check's corrections and its suspects worth a listen are also written as subtitles beside the input, INPUT-basename.possible-LANG-CORRECTIONS-review.srt, and stay there with -M: a player offers them as one more track, so they are checked by watching, each at its moment with the audio under it. [直] cues show the audio's correction and what it replaced, [?] cues the suspect line, its best untaken candidate and why; each ends with the original's line. The lines merely far in meaning stay in the text review only.
 ** 1.13.0
 *** 2026-10-31_23-54-41 UTC (日曜日)
 **** Cross-check: a re-decoded line is taken only when it brings in the name or the number the original has and the line lacks. A LaBSE gain is noise at line length (Terminator 2: a change of punctuation +0.17, 大式 → 大好き +0.13, the genuine 逃亡を図って +0.04) and an audio far surer of a text is no better (鎌は → ママは Δ +9.61); every right acceptance on Terminator 1 and 2 brought a name or a number. The rest stay listed with their candidates.
@@ -1977,6 +1980,10 @@ def uncovered(cues, vad):
     for c in cues: cov[int(c[0]*10):int(c[1]*10)+1] = 1
     return [(s, e) for s, e in vad if e-s >= 0.8 and int(e*10) < len(cov) and cov[int(s*10):int(e*10)].mean() < 0.3]
 
+def worth_a_listen(x):
+    """a suspect missing a name or number, or with a candidate the audio nearly took; the rest is mostly paraphrase"""
+    return "name" in x[3] or "number" in x[3] or any(g >= -3 for _, g in x[5])
+
 def write_report(path, cues, vad, used, dropped, ref_count, check=(), check_note=""):
     miss = uncovered(cues, vad); low = [c for c in cues if (c[3] < LOW_CONF if c[3] <= 0 else c[3] < 0.5)]; multi = [c for c in cues if c[4]]
     still = unvoiced(check, [(c[0], c[1]) for c in cues]); rescues = used.get("rescues", [])
@@ -2008,7 +2015,7 @@ def write_report(path, cues, vad, used, dropped, ref_count, check=(), check_note
             for s, e, old, new, kind, gain, why, en in xc["fixes"]:
                 f.write("%s --> %s  [%s, Δ %+.2f, %s]\n    %s\n => %s\n    EN: %s\n" % (fmt_time(s), fmt_time(e), kind, gain, why, old, new, en))
             # worth a listen: a missing name or number, or a candidate the audio nearly took; the rest is mostly the dub paraphrasing
-            near = lambda x: "name" in x[3] or "number" in x[3] or any(g >= -3 for _, g in x[5])
+            near = worth_a_listen
             top = [x for x in xc["suspects"] if near(x)]; rest = [x for x in xc["suspects"] if not near(x)]
             f.write("\nCross-check, suspects worth a listen — a name or number missing, or a candidate within 3 of the current text (a confirmed fix goes into the corrections file): %d\n\n" % len(top))
             for s, e, t, why, en, cands in top:
@@ -2022,6 +2029,39 @@ def write_report(path, cues, vad, used, dropped, ref_count, check=(), check_note
         f.write("\nDropped Whisper segments: %d\n\n" % len(dropped))
         for seg, why in dropped: f.write("%s --> %s  [%s]  %s\n" % (fmt_time(seg["start"]), fmt_time(seg["end"]), why, seg["text"].strip()))
     return len(miss), len(low), len(still)
+#+end_src
+**** The corrections review as subtitles
+The same cross-check, filtered to what a person should hear, as an SRT
+beside the input: =INPUT-basename.possible-LANG-CORRECTIONS-review.srt=.
+A player that picks up subtitles by the film's name offers it as one
+more track, so the review is done by watching — each line at its own
+moment, with the audio under it, instead of seeking timestamps from a
+text file.  It is written beside the input on every run with the
+cross-check, and stays there when =-M= moves the SRT and the text
+review into the cache: it is a file for a person, the cache is not.
+
+Two kinds of cue, nothing else: the lines the audio corrected (=[直]=,
+the new text and what it replaced, since an automatic correction is
+the thing most worth doubting) and the suspects worth a listen (=[?]=,
+the line, the best candidate the audio did not take, and why it is
+suspect).  The lines merely far in meaning — mostly the dub
+paraphrasing — are left to the text review.  Each cue ends with the
+original's line, cut to a readable length.
+#+begin_src python
+def write_review_srt(path, xc, near):
+    def en(t): t = re.sub(r"\s+", " ", t).strip(); return "EN: " + (t if len(t) <= 110 else t[:107] + "...")
+    cues = []
+    for s, e, old, new, kind, gain, why, eng in xc["fixes"]:
+        cues.append((s, e, "[直] %s\n← %s  (%s, Δ %+.1f)\n%s" % (new.replace("\n", " / "), old.replace("\n", " / "), why, gain, en(eng))))
+    for s, e, t, why, eng, cands in xc["suspects"]:
+        if not near((s, e, t, why, eng, cands)): continue
+        best = max(cands, key=lambda c: c[1]) if cands else None
+        cues.append((s, e, "[?] %s  (%s)\n%s%s" % (t.replace("\n", " / "), why, "候補: %s  (Δ %+.1f)\n" % (best[0], best[1]) if best else "", en(eng))))
+    cues.sort()
+    for k in range(len(cues) - 1):                     # a player shows overlapping cues stacked; keep them in turn
+        if cues[k][1] > cues[k + 1][0]: cues[k] = (cues[k][0], max(cues[k][0] + 0.3, cues[k + 1][0]), cues[k][2])
+    write_srt(path, cues)
+    return len(cues)
 #+end_src
 *** Container tracks
 When the input is a container, the audio and the timing reference can
@@ -2430,6 +2470,8 @@ def cmd_run(a):
     out = [(c["start"], c["end"], wrap_lines(c["text"], cfg) if a.group == "sentence" else c["text"], c["logprob"], c.get("multi", False)) for c in sents]
     write_srt(a.out, [(s, e, t) for s, e, t, _, _ in out])
     nmiss, nlow, nstill = write_report(a.report, out, vad, used, dropped, len(cues), check, check_note)
+    if a.review_srt and used["crosscheck"] is not None:
+        print("  corrections review: %d cues in %s" % (write_review_srt(a.review_srt, used["crosscheck"], worth_a_listen), a.review_srt), flush=True)
     print("written %s: %d cues; uncovered speech chunks %d; low-confidence lines %d; report %s" % (a.out, len(out), nmiss, nlow, a.report))
     if not check: print("  check: no check track — the coverage of the dialogue is UNVERIFIED")
     else:
@@ -2468,6 +2510,7 @@ def main():
     r.add_argument("--group", choices=["sentence", "cue"], default="sentence", help="one whole sentence per cue, or the reference's cue sizes")
     r.add_argument("--fixes", default="", help="corrections file: wrong<TAB>right[<TAB>H:MM:SS] per line")
     r.add_argument("--no-crosscheck", dest="crosscheck", action="store_false", help="skip the cross-check against the original's subtitles")
+    r.add_argument("--review-srt", dest="review_srt", default="", help="write the corrections to check as an SRT here")
     p = sub.add_parser("probe", parents=[common], help="probe option values")
     p.add_argument("--what", required=True, choices=["timeline", "regions", "language", "models", "names", "all"])
     p.add_argument("--models", default="turbo,large-v3,medium"); p.add_argument("--samples", type=int, default=12)
@@ -2535,6 +2578,9 @@ INPUT is any audio or video file ffmpeg reads (an extracted .aac, an MKV, ...).
 Output: INPUT-basename.LANG.srt and INPUT-basename.LANG_review.txt beside the
 input (the review lists speech left without a line and the least confident
 lines); the work dir keeps the VAD and both Whisper passes as a cache.
+With the cross-check, INPUT-basename.possible-LANG-CORRECTIONS-review.srt
+beside the input too, kept there with -M: the audio's corrections ([直]) and
+the suspects worth a listen ([?]) as subtitles, to check by watching.
 
 Options (default in brackets):
   -h            this help
@@ -2694,6 +2740,7 @@ DIR="$(cd "$(dirname "$INPUT")" && pwd)"
 [ -z "$WORK" ] && WORK="/tmp/subtitles/$BASE"
 [ -z "$FIXES" ] && FIXES="${XDG_DATA_HOME:-$HOME/.local/share}/subtitles/fixes/$BASE.tsv"
 REPORT="${OUT%.srt}_review.txt"
+REVIEWSRT="$DIR/$BASE.possible-$LANGCODE-CORRECTIONS-review.srt"   # beside the input, never moved: it is for watching
 mkdir -p "$WORK"
 #+end_src
 *** The Whisper venv
@@ -2850,7 +2897,7 @@ SPKOPT="--no-speakers"; [ "$SPEAKERS" = "on" ] && SPKOPT=""
 XCOPT="--no-crosscheck"; [ "$XCHECK" = "on" ] && XCOPT=""
 "$PY" "$WHISPERPY" run --audio "$WAV" --lang "$LANGCODE" "${REFOPT[@]}" \
     --names "$NAMES" --model "$MODEL" --work "$WORK" --out "$OUT" --report "$REPORT" $FORCE $SPKOPT \
-    --check "$CHECK" --check-note "$CHECKNOTE" --group "$GROUP" --fixes "$FIXES" $XCOPT
+    --check "$CHECK" --check-note "$CHECKNOTE" --group "$GROUP" --fixes "$FIXES" --review-srt "$REVIEWSRT" $XCOPT
 #+end_src
 *** Optional: update the MKV in place
 The new SRT becomes a subtitle track of the input itself.  Position:
@@ -2918,7 +2965,8 @@ for t in json.load(sys.stdin)["tracks"]: print("   %2d %-9s %-22s %s" % (t["id"]
 **** Tidy up
 The SRT now lives inside the MKV; it and the review are moved into
 the work dir (still there for a re-mux or a look, until the cache is
-cleared), after the review's summary lines have been shown.
+cleared), after the review's summary lines have been shown.  The
+corrections review SRT stays beside the MKV.
 #+begin_src bash
     echo "Review summary:"
     head -3 "$REPORT" | sed 's/^/   /'
@@ -2936,6 +2984,7 @@ else
     echo "Subtitles: $OUT"
     echo "Review:    $REPORT"
 fi
+[ "$XCHECK" = on ] && [ -f "$REVIEWSRT" ] && echo "To check: $REVIEWSRT (the audio's corrections and the suspects, as subtitles)"
 echo "Cache:     $WORK  (re-run with -f to transcribe again)"
 echo "-------------------------"
 #+end_src
