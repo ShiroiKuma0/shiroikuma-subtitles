@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 2.2.1 - description
+* subtitles - version 2.3.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -155,15 +155,17 @@ subtitles mkv [options] INPUT            INPUT: any audio or video file ffmpeg r
                 of another audio stream; "-v none" for no check)
   -c CHANNEL    auto|center|mix: decode only the centre channel of a surround
                 dub, where the dialogue is (default auto: when it has one)
-  -M            update the input MKV in place: the SRT, named "Whisper",
-                replaces the tool's earlier one (a SubRip track of LANG named
-                "Whisper", or one given by -R), else goes in before the first
+  -M            update the input MKV in place: the SRT, named in its own
+                language (日本語) and marked with the hidden track tag
+                SHIROIKUMA_SUBTITLES, replaces the tool's earlier one (the
+                track of LANG with that tag, or one given by -R), else goes
+                in before the first
                 subtitle track of LANG (text before bitmap), after all
                 subtitles when there is none; any other track is kept;
                 verified before replacing; the SRT and the review then move
                 into the work dir (nothing is left beside the movie)
   -R IDS        with -M: also replace these tracks (mkvmerge ids, comma-
-                separated) — the tool's SRTs made before it named its track
+                separated) — the tool's SRTs made before it tagged its track
   -S N          sample regions for the probes (default 12)
   -L MODELS     models tried by the models probe (default turbo,large-v3,medium)
 #+end_example
@@ -206,6 +208,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   into the Hugging Face cache; the ECAPA speaker model (80 MB) into
   =/tmp/subtitles/models=.
 * Changelog
+** 2.3.0
+*** 2026-11-02_22-00-00 UTC (月曜日)
+**** The track -M writes is named 日本語 again (in its own language for any other), as a player shows it: 2.2.x named it "Whisper" to recognise it later, which put a tool's name in front of the viewer. The tool's own track is now told by a hidden Matroska track tag, SHIROIKUMA_SUBTITLES=<version>, which no player displays; -M replaces only the track of the language carrying it (or named Whisper by 2.2.x, or given with -R), refuses a remux that does not end with exactly one such track, and the reference choice leaves it out.
 ** 2.2.1
 *** 2026-11-02_20-30-00 UTC (月曜日)
 **** A burst of one shout keeps every copy: a copy of a repeated line too short or timed at an instant now counts as heard when believable copies lie on both sides of it, so 痛い said six times is no longer written five (四股踏んじゃった。 e07, 13:00); a copy with nothing believable after it is still an echo of the line (Dream ×4 stays one).
@@ -351,7 +356,7 @@ extras =subtitles -s= installs.
 # Tangled from subtitles.org in ~/git/shiroikuma-subtitles.  Edit that, never
 # this file: the next tangle overwrites it.
 
-VERSION="2.2.1"
+VERSION="2.3.0"
 VENV="${SUBTITLES_VENV:-$HOME/venv.shiroikuma-subtitles}"
 REPO="${SUBTITLES_REPO:-$HOME/git/shiroikuma-subtitles}"
 GITURL="https://github.com/ShiroiKuma0/shiroikuma-subtitles"
@@ -3223,7 +3228,7 @@ def same_lang(tag, lang):
 def ffprobe_streams(path):
     import subprocess
     out = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
-                          "stream=index,codec_type,codec_name:stream_tags=language,title:stream_disposition=forced,default,hearing_impaired",
+                          "stream=index,codec_type,codec_name:stream_tags=language,title,SHIROIKUMA_SUBTITLES:stream_disposition=forced,default,hearing_impaired",
                           "-of", "json", path], capture_output=True, text=True).stdout
     res = []
     for st in json.loads(out or "{}").get("streams", []):
@@ -3231,6 +3236,7 @@ def ffprobe_streams(path):
         res.append(dict(index=st["index"], type=st["codec_type"], codec=st.get("codec_name", "?"),
                         lang=tags.get("language", "und"), title=tags.get("title", ""),
                         forced=bool(disp.get("forced")), default=bool(disp.get("default")),
+                        own=bool(tags.get("SHIROIKUMA_SUBTITLES")) or tags.get("title", "") == "Whisper",   # the tool's own track (named Whisper in 2.2.x)
                         sdh=bool(disp.get("hearing_impaired")) or bool(re.search(r"\bSDH\b|\bCC\b|deaf|hearing|聴覚", tags.get("title", ""), re.I))))
     return res
 #+end_src
@@ -3307,7 +3313,7 @@ def cmd_tracks(a):
         # a SubRip track of the dub's language is most likely this tool's own earlier output: only when nothing else exists
         good = [c for c in full if not (c[1]["codec"] == "subrip" and same_lang(c[1]["lang"], a.lang))]
         orig = [c for c in good if same_lang(c[1]["lang"], a.lang)] or good
-        for c in full: c[1]["sdh"] = c[1]["title"] != "Whisper" and (c[1]["sdh"] or labelled(tcues.get(c[1]["index"], [])))
+        for c in full: c[1]["sdh"] = not c[1]["own"] and (c[1]["sdh"] or labelled(tcues.get(c[1]["index"], [])))
         sdh = [[c for c in full if c[1]["sdh"] and same_lang(c[1]["lang"], l)] for l in (a.lang, "en")]
         pick = max(sdh[0] or sdh[1] or orig or full or cand, key=lambda c: len(c[2])) if cand else None
         print("subtitle tracks (cue timings serve as the speech map; text is not used):")
@@ -3784,9 +3790,11 @@ Options (default in brackets):
   -c CHANNEL    auto: of a surround dub only the centre channel, where the
                 dialogue is (the effects and score stay out); center: insist
                 on it; mix: a downmix of all channels [auto]
-  -M            update the input MKV in place: the SRT, named "Whisper",
-                replaces the tool's earlier one — a SubRip track of LANG named
-                "Whisper", or one given by -R — else goes before the first
+  -M            update the input MKV in place: the SRT, named in its own
+                language (ja: 日本語) and marked with the hidden track tag
+                SHIROIKUMA_SUBTITLES, replaces the tool's earlier one — the
+                track of LANG carrying that tag, or one given by -R — else
+                goes before the first
                 subtitle track of LANG (text before bitmap), after all subtitle
                 tracks when there is none; every other track is kept, a
                 publisher's SubRip of LANG too; the remux is verified
@@ -3794,8 +3802,8 @@ Options (default in brackets):
                 SRT and the review file then move into the work dir, so
                 nothing is left beside the movie [no]
   -R IDS        with -M, also replace these tracks (mkvmerge ids, comma-
-                separated): the tool's SRTs from before 2.2.0, which carry no
-                name and cannot be told from a publisher's by their tags; each
+                separated): the tool's SRTs from before 2.3.0, which carry no
+                tag and cannot be told from a publisher's; each
                 must be a SubRip track of LANG [none]
   -g sentence|cue
                 sentence: every cue is one whole sentence, as many lines as
@@ -4090,14 +4098,15 @@ own = [i for i in subs if same(d["tracks"][ids.index(i)]["properties"].get("lang
 srt = [i for i in own if d["tracks"][ids.index(i)]["codec"].startswith("SubRip")]
 bad = [i for i in extra if i not in srt]
 if bad: sys.exit("-R %s: not a SubRip track of %s" % (",".join(map(str, bad)), lang))
-# the tool'"'"'s own earlier SRT, named Whisper, or given by -R: replaced; a publisher'"'"'s SRT of the language is kept
-old = [i for i in srt if d["tracks"][ids.index(i)]["properties"].get("track_name") == "Whisper" or i in extra]
+# the tool'"'"'s own earlier SRT — tagged SHIROIKUMA_SUBTITLES (named Whisper in 2.2.x) — or one given by -R: replaced; a publisher'"'"'s SRT is kept
+own_track = lambda p: bool(p.get("tag_shiroikuma_subtitles")) or p.get("track_name") == "Whisper"
+old = [i for i in srt if own_track(d["tracks"][ids.index(i)]["properties"]) or i in extra]
 at = old[0] if old else (own[0] if own else (subs[-1] + 1 if subs else len(ids)))
 keep = [i for i in ids if i not in old]
 order = ["0:%d" % i for i in keep if i < at] + ["1:0"] + ["0:%d" % i for i in keep if i >= at]   # the track it goes before, when nothing is replaced, follows it
 prev = d["tracks"][ids.index(old[0])]["properties"] if old else {}
-print(",".join(order) + "|" + ",".join(str(i) for i in old) + "|" + ("yes" if prev.get("default_track") else "no") + "|Whisper")' "$LANGCODE" "$REPLACE" 2>&1)" || { echo "Error: $ORDER"; exit 1; }
-    OLDNAME="${ORDER#*|*|*|}"; ORDER="${ORDER%|*}"      # the replaced track's default flag is carried over; the name marks the track as the tool's
+print(",".join(order) + "|" + ",".join(str(i) for i in old) + "|" + ("yes" if prev.get("default_track") else "no") + "|" + {"ja": "日本語", "en": "English", "de": "Deutsch", "cs": "Čeština", "fr": "Français", "es": "Español", "it": "Italiano", "ko": "한국어", "zh": "中文", "ru": "Русский", "pl": "Polski", "pt": "Português", "nl": "Nederlands", "sv": "Svenska"}.get(lang, lang))' "$LANGCODE" "$REPLACE" 2>&1)" || { echo "Error: $ORDER"; exit 1; }
+    OLDNAME="${ORDER#*|*|*|}"; ORDER="${ORDER%|*}"      # the track is named in its own language (日本語); the replaced track's default flag is carried over
     OLDDEF="${ORDER##*|}"; ORDER="${ORDER%|*}"
     EXCL="${ORDER#*|}"; ORDER="${ORDER%|*}"
     SUBOPT=(); [ ! -z "$EXCL" ] && SUBOPT=(--subtitle-tracks "!$EXCL")
@@ -4109,7 +4118,9 @@ print(",".join(order) + "|" + ",".join(str(i) for i in old) + "|" + ("yes" if pr
     echo "Updating $INPUT in place: inserting $OUT (track order $ORDER) ..."
     echo "-------------------------"
     rm -f "$TMPMKV"
-    mkvmerge -o "$TMPMKV" "${SUBOPT[@]}" "$INPUT" --language 0:"$LANGCODE" --default-track-flag 0:"$OLDDEF" ${OLDNAME:+--track-name "0:$OLDNAME"} --sub-charset 0:UTF-8 "$OUT" --track-order "$ORDER" | grep -v '進行状況\|Progress' || true
+    TAGXML="$WORK/track-tags.xml"      # the hidden mark of the tool's own track: a player shows the name, never this
+    printf '<?xml version="1.0"?>\n<Tags><Tag><Targets/><Simple><Name>SHIROIKUMA_SUBTITLES</Name><String>%s</String></Simple></Tag></Tags>\n' "$VERSION" > "$TAGXML"
+    mkvmerge -o "$TMPMKV" "${SUBOPT[@]}" "$INPUT" --language 0:"$LANGCODE" --default-track-flag 0:"$OLDDEF" --track-name "0:$OLDNAME" --tags "0:$TAGXML" --sub-charset 0:UTF-8 "$OUT" --track-order "$ORDER" | grep -v '進行状況\|Progress' || true
     counts() { ffprobe -v error -count_packets -select_streams "$2" -show_entries stream=nb_read_packets -of csv=p=0 "$1" | tr '\n' ' '; }
     ntracks() { mkvmerge -J "$1" | "$PY" -c 'import json,sys; print(len(json.load(sys.stdin)["tracks"]))'; }
     NEXCL=0; [ -z "$EXCL" ] || NEXCL=$(( $(echo "$EXCL" | tr -cd , | wc -c) + 1 ))     # SRTs of our own replaced
@@ -4122,6 +4133,12 @@ print(",".join(order) + "|" + ",".join(str(i) for i in old) + "|" + ("yes" if pr
     if [ "$(counts "$INPUT" v)$(counts "$INPUT" a)" != "$(counts "$TMPMKV" v)$(counts "$TMPMKV" a)" ]
     then
         echo "Error: video/audio packet counts differ between the original and the remux; the original is untouched, the remux is at $TMPMKV"
+        exit 1
+    fi
+    NOWN="$(mkvmerge -J "$TMPMKV" | "$PY" -c 'import json,sys; print(sum(1 for t in json.load(sys.stdin)["tracks"] if t["type"] == "subtitles" and t["properties"].get("tag_shiroikuma_subtitles")))')"
+    if [ "$NOWN" -ne 1 ]
+    then
+        echo "Error: the remux has $NOWN tracks tagged as this tool's, expected 1; the original is untouched, the remux is at $TMPMKV"
         exit 1
     fi
     mv -f "$TMPMKV" "$INPUT"; MKVDONE=1

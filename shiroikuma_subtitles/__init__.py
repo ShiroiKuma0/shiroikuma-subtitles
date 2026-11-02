@@ -1,3 +1,3 @@
 """Sentence-aligned SRTs from an EPUB and its audiobook, for shiroikuma-jisho."""
 
-__version__ = "2.2.1"
+__version__ = "2.3.0"
