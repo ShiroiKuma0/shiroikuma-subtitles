@@ -52,6 +52,10 @@ written with a leading `,` (Org's escape), indented or not; it tangles back.
   `~/.local/share/subtitles/fixes/<basename>.tsv`, outside the work dir.
 - The reference SRT and the audio must be on the same timeline — verify the
   first cue against the first spoken line before a long run.
+- `-M` names its track `Whisper` and replaces only a Japanese SRT with that
+  name (or one given with `-R`). Never go back to replacing every SubRip
+  track of the language: Snatch, 座頭市, 相撲道 and 四股踏んじゃった。 carry the
+  publisher's Japanese as SubRip, and it would be deleted.
 
 ## Things that are load-bearing — do not "simplify" them
 
