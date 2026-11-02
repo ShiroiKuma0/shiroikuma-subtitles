@@ -60,8 +60,10 @@ written with a leading `,` (Org's escape), indented or not; it tangles back.
   publisher's Japanese as SubRip, and it would be deleted.
 - `subtitles fix-mkv FILM WORKING.srt` puts 白い熊's corrections (made in
   白い熊 縁's correction mode) back into the tagged track, through the same
-  `put_track` as `-M`, and appends each changed fragment to the film's fixes
-  TSV so a rerun keeps it. Its stdout lines and exit codes are a contract
+  `put_track` as `-M`, and appends each changed line to the film's fixes TSV
+  as a whole-line `LINE` entry, applied to the finished cue on a rerun. Never
+  go back to fragments for these: a fragment is applied to Whisper's raw
+  words and can hit two segments at once (Shot Caller, 11:47). Its stdout lines and exit codes are a contract
   with Yosuga — change them only together with the Yosuga chat.
 
 ## Things that are load-bearing — do not "simplify" them

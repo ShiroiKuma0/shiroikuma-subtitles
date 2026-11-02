@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shiroikuma-subtitles"
-version = "2.4.0"
+version = "2.5.0"
 description = "Subtitles for shiroikuma-jisho: sentence-aligned SRTs from an EPUB and its audiobook, and transcribed SRTs from a film's dub"
 readme = "README.md"
 requires-python = ">=3.10"

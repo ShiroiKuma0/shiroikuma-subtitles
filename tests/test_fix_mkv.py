@@ -95,7 +95,7 @@ def test_two_corrections_go_into_the_tool_track_and_nowhere_else(tmp_path, film,
     assert extract(film, publisher["id"], tmp_path / "pub-after.srt").count("急げ！") == 1
     assert not w.exists() and not review.exists()
     fixes = (tmp_path / "share" / "subtitles" / "fixes" / (film.stem + ".tsv")).read_text(encoding="utf-8").splitlines()
-    assert len(fixes) == 2 and all(len(l.split("\t")) == 3 for l in fixes)
+    assert fixes == ["LINE\t急げ\t急げ!急げ!\t0:00:05.000", "LINE\t行こう\t行こうぜ\t0:00:07.000"]
 
 
 def test_a_track_changed_since_extraction_is_refused_and_the_film_untouched(tmp_path, film):
@@ -128,3 +128,42 @@ def test_nothing_changed_means_no_remux(tmp_path, film):
     r = fix(film, w, "--expect-sha256", sha)
     assert r.returncode == 0 and r.stdout.splitlines()[-2:] == ["CHANGED 0", "VERIFIED"]
     assert film.read_bytes() == data
+
+
+# --- the corrections file's whole-line entries, applied to finished cues ---
+
+@pytest.fixture(scope="module")
+def film_py(tmp_path_factory):
+    import importlib.util
+    path = tmp_path_factory.mktemp("py") / "film.py"
+    out = subprocess.run(["bash", "-c", "source <(sed '/^case \"${1:-}\" in$/,$d' %s); mkv_whisper_py" % SCRIPT()],
+                         capture_output=True, text=True, check=True).stdout
+    path.write_text(out, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("film", path)
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_line_correction_changes_only_the_cue_at_its_time(film_py):
+    cues = [(707.6, 708.6, "ナイスシュート", 0, False), (720.0, 721.0, "ナイスシュート", 0, False)]
+    out, done = film_py.apply_line_fixes(cues, [("ナイスシュート", "ナイス", 707.6)])
+    assert [c[2] for c in out] == ["ナイス", "ナイスシュート"] and done[0][1]
+
+
+def test_a_line_correction_ignores_line_breaks_and_keeps_its_own(film_py):
+    cues = [(10.0, 12.0, "じゃあ少佐\n気をつけて", 0, False)]
+    out, _ = film_py.apply_line_fixes(cues, [("じゃあ少佐気をつけて", "じゃあ少佐、\n気をつけて", 10.4)])
+    assert out[0][2] == "じゃあ少佐、\n気をつけて"
+
+
+def test_an_emptied_line_drops_the_cue_and_a_missing_one_is_reported(film_py):
+    cues = [(1.0, 2.0, "えっ", 0, False), (5.0, 6.0, "行こう", 0, False)]
+    out, done = film_py.apply_line_fixes(cues, [("えっ", "", 1.0), ("帰る", "カイル", 5.0)])
+    assert [c[2] for c in out] == ["行こう"] and [ok for _, ok in done] == [True, False]
+
+
+def test_line_entries_and_fragments_are_read_apart(film_py, tmp_path):
+    f = tmp_path / "fixes.tsv"
+    f.write_text("帰る\tカイル\t1:30:55\nLINE\t急げ\t急げ!\\n急げ!\t0:00:05.000\n", encoding="utf-8")
+    assert [x[:2] for x in film_py.read_fixes(str(f))] == [("帰る", "カイル")]
+    assert film_py.read_line_fixes(str(f)) == [("急げ", "急げ!\n急げ!", 5.0)]

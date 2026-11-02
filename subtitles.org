@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 2.4.0 - description
+* subtitles - version 2.5.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -208,6 +208,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   into the Hugging Face cache; the ECAPA speaker model (80 MB) into
   =/tmp/subtitles/models=.
 * Changelog
+** 2.5.0
+*** 2026-11-03_00-30-00 UTC (火曜日)
+**** fix-mkv records a correction as the whole line — LINE, old line, new line, start time — and subtitles mkv applies such entries to the finished cue whose start and text match, after the cues are built. 2.4.0 recorded the smallest changed fragment, which the corrections file applies to Whisper's raw words before assembly, where it can match twice: Shot Caller, 11:47, ナイスシュート (Whisper wrote it twice over one utterance) corrected to ナイス gave シュート→nothing, which would have cut it from both segments, and the repeat handling would have written ナイス、ナイス. A line break the person made is kept; an emptied line drops the cue; a line no longer there is reported as matching nothing, in the summary and the review.
 ** 2.4.0
 *** 2026-11-02_23-00-00 UTC (月曜日)
 **** New subcommand fix-mkv: a corrected copy of the film's 日本語 track goes back into the film, for 白い熊 縁's correction mode, which runs it from a button. It replaces only the track tagged SHIROIKUMA_SUBTITLES (refusing 0 or 2 such), after a free-space check and the same verified remux as -M — the two now share one function, put_track, so the checks cannot drift apart. Each changed line also goes into the film's corrections file as the smallest changed fragment, so a later subtitles mkv keeps it. --expect-sha256 refuses when the track changed since the working copy was taken; --review deletes the review and the working copy after VERIFIED. Output is one event per line (PROGRESS, CHANGED, FIXES, VERIFIED) with stable exit codes 0, 2–7.
@@ -359,7 +362,7 @@ extras =subtitles -s= installs.
 # Tangled from subtitles.org in ~/git/shiroikuma-subtitles.  Edit that, never
 # this file: the next tangle overwrites it.
 
-VERSION="2.4.0"
+VERSION="2.5.0"
 VENV="${SUBTITLES_VENV:-$HOME/venv.shiroikuma-subtitles}"
 REPO="${SUBTITLES_REPO:-$HOME/git/shiroikuma-subtitles}"
 GITURL="https://github.com/ShiroiKuma0/shiroikuma-subtitles"
@@ -1730,6 +1733,20 @@ the prompt, which changes the transcription itself.  Here the
 replacement is made across tokens: it goes on the first token touched,
 which takes over the last one's end time, and the tokens between go.
 A fix that matches nothing is reported, so a typo in the file shows.
+
+A second kind of line, =LINE<TAB>old line<TAB>new line<TAB>H:MM:SS.mmm=,
+corrects a whole finished cue: what =fix-mkv= writes when a person
+corrects the film's track in 白い熊 縁.  It is applied after the cues
+are built, to the cue starting within a second of the time whose text
+is the old line (whitespace and line breaks aside) — never to Whisper's
+raw words, where a fragment can be in two segments at once (Shot
+Caller, 11:47: ナイスシュート written twice by Whisper over one
+utterance, corrected to ナイス; the fragment シュート→ would have cut it
+from both, and the repeat handling made ナイス、ナイス of them).  A line
+break the person made is kept, written =\n=; an empty new line drops the
+cue.  Entries are applied in file order, so a line corrected twice ends
+as the second correction says.  A line the new transcription no longer
+has is reported as matching nothing and left alone.
 #+begin_src python
 def read_fixes(path):
     """-> [(wrong, right, time or None)]"""
@@ -1738,7 +1755,7 @@ def read_fixes(path):
     for ln in open(path, encoding="utf-8"):
         if not ln.strip() or ln.lstrip().startswith("#"): continue
         f = ln.rstrip("\n").split("\t")
-        if len(f) < 2 or not f[0]: continue
+        if len(f) < 2 or not f[0] or f[0] == "LINE": continue
         at = None
         if len(f) > 2 and f[2].strip():
             p = [float(v) for v in f[2].strip().split(":")]
@@ -1771,6 +1788,28 @@ def apply_fixes(segs, fixes):
             if here: s["text"] = "".join(w["w"] for w in s["words"]); n += here
         done.append(((wrong, right, at), n))
     return done
+def read_line_fixes(path):
+    """LINE entries -> [(old, new, time)]; a line break in new is written \\n"""
+    out = []
+    if not path or not os.path.exists(path): return out
+    for ln in open(path, encoding="utf-8"):
+        f = ln.rstrip("\n").split("\t")
+        if len(f) < 4 or f[0] != "LINE" or not f[1]: continue
+        p = [float(v) for v in f[3].strip().split(":")]
+        out.append((f[1].replace("\\n", "\n"), f[2].replace("\\n", "\n"), sum(v * 60**(len(p) - 1 - i) for i, v in enumerate(p))))
+    return out
+
+def apply_line_fixes(cues, fixes):
+    """finished cues (start, end, text, logprob, multi) -> (cues, [((old, new, time), applied)])"""
+    key = lambda t: re.sub(r"\s", "", t)
+    cues, done = list(cues), []
+    for old, new, at in fixes:
+        hit = next((k for k, c in enumerate(cues) if abs(c[0] - at) <= 1.0 and key(c[2]) == key(old)), None)
+        if hit is not None:
+            if new.strip(): cues[hit] = (cues[hit][0], cues[hit][1], new) + tuple(cues[hit][3:])
+            else: del cues[hit]
+        done.append(((old, new, at), hit is not None))
+    return cues, done
 #+end_src
 *** Speakers
 **** Phrases
@@ -3161,6 +3200,10 @@ def write_report(path, cues, vad, used, dropped, ref_count, check=(), check_note
                 for ct, g in cands: f.write("    ?  %s  (Δ %+.2f)\n" % (ct, g))
             f.write("\nCross-check, other lines far in meaning from the original (usually the dub paraphrasing): %d\n\n" % len(rest))
             for s, e, t, why, en, cands in rest: f.write("%s  [%s]  %s  |  EN: %s\n" % (fmt_time(s), why, t, en))
+        lf = used.get("line_fixes", [])
+        if lf:
+            f.write("\nLine corrections from the corrections file: %d, %d matched nothing (the new transcription no longer has that line — look at it)\n\n" % (len(lf), sum(1 for _, ok in lf if not ok)))
+            for (old, new, at), ok in lf: f.write("   %-7s %s  %s -> %s\n" % ("applied" if ok else "NONE", hms(at), old.replace("\n", " / "), new.replace("\n", " / ") or "(dropped)"))
         rp = used.get("repeats", [])
         f.write("\nRepeated lines heard fewer times than written (made one cue; Whisper repeating itself? listen): %d\n\n" % len(rp))
         for s, e, t, k, m in rp: f.write("%s --> %s  [written %d, heard %d]  %s\n" % (fmt_time(s), fmt_time(e), k, m, t))
@@ -3636,6 +3679,11 @@ def cmd_run(a):
     out = [(c["start"], c["end"], wrap_lines(c["text"], cfg) if a.group == "sentence" else c["text"], c["logprob"], c.get("multi", False)) for c in sents]
     out, nrep, used["repeats"] = join_repeats(out, merged, cfg, lambda t: wrap_lines(t, cfg))
     if nrep: print("  repeated lines: %d runs of one line made one cue, %d heard fewer times than written" % (nrep, len(used["repeats"])), flush=True)
+    lfix = read_line_fixes(a.fixes)
+    if lfix:
+        out, used["line_fixes"] = apply_line_fixes(out, lfix)
+        print("  corrections file %s: %d line corrections, %d applied, %d matched nothing"
+              % (a.fixes, len(lfix), sum(1 for _, ok in used["line_fixes"] if ok), sum(1 for _, ok in used["line_fixes"] if not ok)), flush=True)
     write_srt(a.out, [(s, e, t) for s, e, t, _, _ in out])
     nmiss, nlow, nstill = write_report(a.report, out, vad, used, dropped, len(cues), check, check_note)
     if a.review_srt and (used["crosscheck"] is not None or used["repeats"]):
@@ -4241,10 +4289,9 @@ stable exit codes.
 
 Every changed line is also written to the film's corrections file
 (=~/.local/share/subtitles/fixes/<basename>.tsv=, the format =mkv -x=
-reads) as the smallest fragment that changed with a character of
-context, at the line's start time — so a later =subtitles mkv= of the
-film, a new version or =-f=, keeps the corrections instead of
-transcribing the mistakes again.
+reads) as a whole-line entry, =LINE= old, new, start time — so a later
+=subtitles mkv= of the film, a new version or =-f=, applies it to the
+finished cue instead of transcribing the mistake again.
 
 =--expect-sha256= is the SHA-256 of the track as =mkvextract= wrote it
 when the working copy was taken: if the film's track is no longer that
@@ -4329,7 +4376,7 @@ print(t[0]["id"] if len(t) == 1 else "n%d" % len(t))')"
     BASE="$(basename "$FILM")"; BASE="${BASE%.*}"
     FIXFILE="${XDG_DATA_HOME:-$HOME/.local/share}/subtitles/fixes/$BASE.tsv"
     CHANGED="$(python3 - "$WORKDIR/current.srt" "$CLEAN" "$FIXFILE" <<'PYEOF'
-import difflib, os, re, sys
+import os, re, sys
 def srt(path):
     out = []
     for b in re.split(r"\n\s*\n", open(path, encoding="utf-8-sig").read().replace("\r\n", "\n").strip()):
@@ -4339,7 +4386,6 @@ def srt(path):
         a = l[k].split("-->")[0].strip().replace(",", ".")
         h, m, sec = a.split(":"); out.append((int(h) * 3600 + int(m) * 60 + float(sec), "\n".join(l[k + 1:]).strip()))
     return out
-def flat(t): return re.sub(r"\n+", " " if re.search(r"[A-Za-z]\n[A-Za-z]", t) else "", t).strip()
 old, new = srt(sys.argv[1]), srt(sys.argv[2])
 if len(old) == len(new): pairs = list(zip(old, new)); unpaired = 0
 else:
@@ -4349,20 +4395,11 @@ else:
         if j < len(new) and abs(new[j][0] - o[0]) <= 0.5: pairs.append((o, new[j])); j += 1
     unpaired = len(old) + len(new) - 2 * len(pairs)
 lines, n = [], unpaired
+esc = lambda t: t.replace("\t", " ").replace("\n", "\\n")
 for (t, a), (_, b) in pairs:
-    a, b = flat(a), flat(b)
-    if a == b: continue
-    n += 1
-    regions = []
-    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
-        if op == "equal": continue
-        if regions and i1 - regions[-1][1] < 2: regions[-1] = [regions[-1][0], i2, regions[-1][2], j2]
-        else: regions.append([i1, i2, j1, j2])
-    for i1, i2, j1, j2 in regions:
-        while i2 - i1 < 2 and (i1 > 0 or i2 < len(a)):          # a fragment needs something of the old text to be found by
-            if i1 > 0: i1 -= 1; j1 -= 1
-            else: i2 += 1; j2 += 1
-        if a[i1:i2]: lines.append("%s\t%s\t%d:%02d:%02d" % (a[i1:i2], b[j1:j2], t // 3600, t % 3600 // 60, t % 60))
+    if re.sub(r"\s", "", a) == re.sub(r"\s", "", b) and a.count("\n") == b.count("\n"): continue
+    n += 1      # the whole line, applied to the finished cue: a fragment could be in two Whisper segments at once
+    lines.append("LINE\t%s\t%s\t%d:%02d:%06.3f" % (esc(a), esc(b), t // 3600, t % 3600 // 60, t % 60))
 if lines:
     os.makedirs(os.path.dirname(sys.argv[3]), exist_ok=True)
     have = set(open(sys.argv[3], encoding="utf-8").read().splitlines()) if os.path.exists(sys.argv[3]) else set()
