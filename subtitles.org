@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 2.2.0 - description
+* subtitles - version 2.2.1 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -206,6 +206,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   into the Hugging Face cache; the ECAPA speaker model (80 MB) into
   =/tmp/subtitles/models=.
 * Changelog
+** 2.2.1
+*** 2026-11-02_20-30-00 UTC (月曜日)
+**** A burst of one shout keeps every copy: a copy of a repeated line too short or timed at an instant now counts as heard when believable copies lie on both sides of it, so 痛い said six times is no longer written five (四股踏んじゃった。 e07, 13:00); a copy with nothing believable after it is still an echo of the line (Dream ×4 stays one).
 ** 2.2.0
 *** 2026-11-02_09-00-00 UTC (月曜日)
 **** Fix: with no text track to check against, the check is the reference's own cue timings, and when the reference is a bitmap track their text is a placeholder; the cross-check compared every line with it — half an hour of forced decoding for no correction, and a review full of false suspects (Batman Begins: 1151 suspects, 0 corrected). It now runs only against a check track with words in it.
@@ -348,7 +351,7 @@ extras =subtitles -s= installs.
 # Tangled from subtitles.org in ~/git/shiroikuma-subtitles.  Edit that, never
 # this file: the next tangle overwrites it.
 
-VERSION="2.2.0"
+VERSION="2.2.1"
 VENV="${SUBTITLES_VENV:-$HOME/venv.shiroikuma-subtitles}"
 REPO="${SUBTITLES_REPO:-$HOME/git/shiroikuma-subtitles}"
 GITURL="https://github.com/ShiroiKuma0/shiroikuma-subtitles"
@@ -2673,6 +2676,12 @@ is no faster than the language's =max_rate=, at most half its words
 are timed at an instant (shorter than =REPEAT_INSTANT=), and it starts
 after the copy before it has ended (two segments hearing the same
 audio overlap: そうだ at 3259.11–3259.91 and again at 3259.53–3259.83).
+A copy failing the first three counts too when believable copies lie
+on both sides of it: in a burst of one shout Whisper hurries some
+copies (四股踏んじゃった。 e07, 13:00: 痛い six times, the fifth timed
+0.10 s), while an echo of a line trails after it with nothing
+believable behind (Terminator, 1:01:04: Dream, then three copies in
+0.2 s).
 A run is then one cue, its line written as many times as it was
 heard; when fewer copies were heard than written, the run is listed
 in the review and in the review subtitles to be listened to.  When
@@ -2690,17 +2699,20 @@ def heard_copies(text, words, s, e, cfg):
         for ch in strip_punct(w["w"]).replace("-", ""): chars.append(ch); owner.append(k)
     flat = "".join(chars)
     if not key: return None
-    found, pos, last_end = 0, flat.find(key), None
+    copies, pos, last_end = [], flat.find(key), None      # True: believable, False: squeezed; overlapping copies are left out
     if pos < 0: return None
     while pos >= 0:
         i0, i1 = owner[pos], owner[pos + len(key) - 1]
         t0, t1 = ws[i0]["start"], ws[i1]["end"]
         inst = sum(1 for w in ws[i0:i1 + 1] if w["end"] - w["start"] < REPEAT_INSTANT)
-        if t1 - t0 >= REPEAT_MIN and len(key) / (t1 - t0) <= cfg["max_rate"] and 2 * inst <= i1 - i0 + 1 \
-           and (last_end is None or t0 >= last_end - 0.1):
-            found += 1; last_end = t1
+        if last_end is None or t0 >= last_end - 0.1:
+            ok = t1 - t0 >= REPEAT_MIN and len(key) / (t1 - t0) <= cfg["max_rate"] and 2 * inst <= i1 - i0 + 1
+            copies.append(ok)
+            if ok: last_end = t1
         pos = flat.find(key, pos + len(key))
-    return found
+    # a squeezed copy between two believable ones is a burst Whisper hurried through (痛い ×6, the fifth 0.10 s);
+    # one with nothing believable after it is an echo of the line (Dream ×4, おめでとう おめでとう then two copies 0.02 s each)
+    return sum(1 for k, ok in enumerate(copies) if ok or (any(copies[:k]) and any(copies[k + 1:])))
 
 def join_repeats(out, segs, cfg, wrap):
     """runs of identical neighbouring cues closer than REPEAT_GAP -> one cue each; returns (cues, joined, suspects)"""
