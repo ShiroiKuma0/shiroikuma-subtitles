@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 2.1.0 - description
+* subtitles - version 2.1.1 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -201,6 +201,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   into the Hugging Face cache; the ECAPA speaker model (80 MB) into
   =/tmp/subtitles/models=.
 * Changelog
+** 2.1.1
+*** 2026-11-02_01-45-00 UTC (月曜日)
+**** Fix: a line both a suspect of the cross-check and a repeat heard fewer times than written got two review cues at the same moment, which overlap (Mission: Impossible – Ghost Protocol, 52:18: それで); it is now one review cue holding both notes.
 ** 2.1.0
 *** 2026-11-01_14-00-00 UTC (日曜日)
 **** Repeated lines: neighbouring cues with the same text less than 500 ms apart — which shiroikuma-jisho merges into one, dropping an utterance of a real repeat (急げ! 急げ!) and hiding Whisper repeating itself — are now one cue, the line written as many times as Whisper's words show it believably spoken (Terminator 2, 1:42:25: 急げ!急げ!急げ!). A line heard fewer times than written is listed in the review and in the review subtitles (Terminator 6, 9:07: お腹の後ろの医者に出席したから, written twice, its first copy's words timed at one instant). The review subtitles no longer hold identical neighbours either.
@@ -335,7 +338,7 @@ extras =subtitles -s= installs.
 # Tangled from subtitles.org in ~/git/shiroikuma-subtitles.  Edit that, never
 # this file: the next tangle overwrites it.
 
-VERSION="2.1.0"
+VERSION="2.1.1"
 VENV="${SUBTITLES_VENV:-$HOME/venv.shiroikuma-subtitles}"
 REPO="${SUBTITLES_REPO:-$HOME/git/shiroikuma-subtitles}"
 GITURL="https://github.com/ShiroiKuma0/shiroikuma-subtitles"
@@ -3166,6 +3169,8 @@ def write_review_srt(path, xc, near, repeats=()):
     for k in range(len(cues) - 1, 0, -1):              # the app would merge identical neighbours anyway; do it here
         if cues[k][2] == cues[k - 1][2] and cues[k][0] - cues[k - 1][1] < REPEAT_GAP:
             cues[k - 1] = (cues[k - 1][0], max(cues[k - 1][1], cues[k][1]), cues[k][2]); del cues[k]
+        elif cues[k][0] - cues[k - 1][0] < 0.3:        # one line both a suspect and a repeat: one cue, both notes
+            cues[k - 1] = (cues[k - 1][0], max(cues[k - 1][1], cues[k][1]), cues[k - 1][2] + "\n" + cues[k][2]); del cues[k]
     for k in range(len(cues) - 1):                     # a player shows overlapping cues stacked; keep them in turn
         if cues[k][1] > cues[k + 1][0]: cues[k] = (cues[k][0], max(cues[k][0] + 0.3, cues[k + 1][0]), cues[k][2])
     write_srt(path, cues)
