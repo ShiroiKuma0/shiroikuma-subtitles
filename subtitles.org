@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 2.3.0 - description
+* subtitles - version 2.4.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -208,6 +208,9 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   into the Hugging Face cache; the ECAPA speaker model (80 MB) into
   =/tmp/subtitles/models=.
 * Changelog
+** 2.4.0
+*** 2026-11-02_23-00-00 UTC (月曜日)
+**** New subcommand fix-mkv: a corrected copy of the film's 日本語 track goes back into the film, for 白い熊 縁's correction mode, which runs it from a button. It replaces only the track tagged SHIROIKUMA_SUBTITLES (refusing 0 or 2 such), after a free-space check and the same verified remux as -M — the two now share one function, put_track, so the checks cannot drift apart. Each changed line also goes into the film's corrections file as the smallest changed fragment, so a later subtitles mkv keeps it. --expect-sha256 refuses when the track changed since the working copy was taken; --review deletes the review and the working copy after VERIFIED. Output is one event per line (PROGRESS, CHANGED, FIXES, VERIFIED) with stable exit codes 0, 2–7.
 ** 2.3.0
 *** 2026-11-02_22-00-00 UTC (月曜日)
 **** The track -M writes is named 日本語 again (in its own language for any other), as a player shows it: 2.2.x named it "Whisper" to recognise it later, which put a tool's name in front of the viewer. The tool's own track is now told by a hidden Matroska track tag, SHIROIKUMA_SUBTITLES=<version>, which no player displays; -M replaces only the track of the language carrying it (or named Whisper by 2.2.x, or given with -R), refuses a remux that does not end with exactly one such track, and the reference choice leaves it out.
@@ -356,7 +359,7 @@ extras =subtitles -s= installs.
 # Tangled from subtitles.org in ~/git/shiroikuma-subtitles.  Edit that, never
 # this file: the next tangle overwrites it.
 
-VERSION="2.3.0"
+VERSION="2.4.0"
 VENV="${SUBTITLES_VENV:-$HOME/venv.shiroikuma-subtitles}"
 REPO="${SUBTITLES_REPO:-$HOME/git/shiroikuma-subtitles}"
 GITURL="https://github.com/ShiroiKuma0/shiroikuma-subtitles"
@@ -3690,6 +3693,103 @@ def main():
 if __name__ == "__main__":
     main()
 #+end_src
+** Putting a track into a film
+Shared by =mkv -M= and =fix-mkv=.  The new SRT becomes a subtitle track
+of the film itself, named in its own language (日本語) and marked as
+this tool's with the hidden Matroska track tag =SHIROIKUMA_SUBTITLES=
+— a player shows the name, never the tag.  Position: in place of the
+tool's own earlier track of that language (the one carrying the tag,
+or named Whisper by 2.2.x, or given with =-R=), else before the first
+subtitle track of the language, so that text precedes bitmap; after
+all subtitle tracks when there is none.  A publisher's SubRip of the
+language is never touched.
+
+The remux goes to a file beside the film, after a free-space check,
+and is verified — the tracks in the new order, every video and audio
+stream with its packet count unchanged, exactly one track carrying the
+tag — before it replaces the original by rename.  Return codes, which
+=fix-mkv= passes on: 3 a track given with =-R= is not a SubRip of the
+language, 5 the remux failed verification (original untouched, the
+remux kept beside it), 6 not enough space.  With =GUI= set, mkvmerge's
+progress is printed as =PROGRESS 0.42= lines.
+#+begin_src bash
+put_track() {    # FILM SRT LANG REPLACE-IDS WORKDIR GUI
+    local input="$1" srt="$2" lang="$3" replace="$4" work="$5" gui="$6" py="${PY:-python3}"
+    local order name olddef excl tmp tagxml need avail nold nnew nexp nexcl nown l p
+    order="$(mkvmerge -J "$input" | "$py" -c '
+import json, sys
+d = json.load(sys.stdin); lang = sys.argv[1]; extra = [int(x) for x in sys.argv[2].split(",") if x.strip()]
+iso = {"ja": "jpn", "en": "eng", "cs": "cze ces", "de": "ger deu", "fr": "fre fra", "es": "spa", "it": "ita", "ko": "kor", "zh": "chi zho", "ru": "rus", "pt": "por", "nl": "dut nld", "pl": "pol", "sv": "swe"}
+same = lambda t: (t or "").lower() == lang or (t or "").lower() in iso.get(lang, "").split()
+ids = [t["id"] for t in d["tracks"]]
+subs = [t["id"] for t in d["tracks"] if t["type"] == "subtitles"]
+own = [i for i in subs if same(d["tracks"][ids.index(i)]["properties"].get("language"))]
+srt = [i for i in own if d["tracks"][ids.index(i)]["codec"].startswith("SubRip")]
+bad = [i for i in extra if i not in srt]
+if bad: sys.exit("-R %s: not a SubRip track of %s" % (",".join(map(str, bad)), lang))
+# the tool'"'"'s own earlier SRT — tagged SHIROIKUMA_SUBTITLES (named Whisper in 2.2.x) — or one given by -R: replaced; a publisher'"'"'s SRT is kept
+own_track = lambda p: bool(p.get("tag_shiroikuma_subtitles")) or p.get("track_name") == "Whisper"
+old = [i for i in srt if own_track(d["tracks"][ids.index(i)]["properties"]) or i in extra]
+at = old[0] if old else (own[0] if own else (subs[-1] + 1 if subs else len(ids)))
+keep = [i for i in ids if i not in old]
+order = ["0:%d" % i for i in keep if i < at] + ["1:0"] + ["0:%d" % i for i in keep if i >= at]   # the track it goes before, when nothing is replaced, follows it
+prev = d["tracks"][ids.index(old[0])]["properties"] if old else {}
+print(",".join(order) + "|" + ",".join(str(i) for i in old) + "|" + ("yes" if prev.get("default_track") else "no") + "|" + {"ja": "日本語", "en": "English", "de": "Deutsch", "cs": "Čeština", "fr": "Français", "es": "Español", "it": "Italiano", "ko": "한국어", "zh": "中文", "ru": "Русский", "pl": "Polski", "pt": "Português", "nl": "Nederlands", "sv": "Svenska"}.get(lang, lang))' "$lang" "$replace" 2>&1)" || { echo "Error: $order"; return 3; }
+    name="${order#*|*|*|}"; order="${order%|*}"      # named in its own language (日本語); the replaced track's default flag is carried over
+    olddef="${order##*|}"; order="${order%|*}"
+    excl="${order#*|}"; order="${order%|*}"
+    local subopt=(); [ -n "$excl" ] && subopt=(--subtitle-tracks "!$excl")
+    tmp="$input.remux-tmp"
+    need=$(( $(stat -c %s "$input") / 1024 + 65536 )); avail=$(df -Pk "$(dirname "$input")" | awk 'NR == 2 { print $4 }')
+    if [ "$avail" -lt "$need" ]
+    then
+        echo "Error: not enough space beside $input: $((avail / 1024)) MiB free, $((need / 1024)) MiB needed; nothing was changed"
+        return 6
+    fi
+    rm -f "$tmp"
+    tagxml="$work/track-tags.xml"      # the hidden mark of the tool's own track
+    printf '<?xml version="1.0"?>\n<Tags><Tag><Targets/><Simple><Name>SHIROIKUMA_SUBTITLES</Name><String>%s</String></Simple></Tag></Tags>\n' "$VERSION" > "$tagxml"
+    if [ "$gui" = 1 ]
+    then
+        mkvmerge --gui-mode -o "$tmp" "${subopt[@]}" "$input" --language 0:"$lang" --default-track-flag 0:"$olddef" --track-name "0:$name" --tags "0:$tagxml" --sub-charset 0:UTF-8 "$srt" --track-order "$order" | while IFS= read -r l
+        do
+            case "$l" in
+                '#GUI#progress '*) p="${l#\#GUI#progress }"; p="${p%\%}"; printf 'PROGRESS %d.%02d\n' $((p / 100)) $((p % 100)) ;;
+                '#GUI#error'*) echo "mkvmerge: ${l#\#GUI#}" ;;
+            esac
+        done
+    else
+        mkvmerge -o "$tmp" "${subopt[@]}" "$input" --language 0:"$lang" --default-track-flag 0:"$olddef" --track-name "0:$name" --tags "0:$tagxml" --sub-charset 0:UTF-8 "$srt" --track-order "$order" | grep -v '進行状況\|Progress' || true
+    fi
+    if [ ! -s "$tmp" ]
+    then
+        echo "Error: mkvmerge wrote no file; the original is untouched"
+        return 5
+    fi
+    nexcl=0; [ -z "$excl" ] || nexcl=$(( $(echo "$excl" | tr -cd , | wc -c) + 1 ))     # SRTs of our own replaced
+    nold="$(mkvmerge -J "$input" | "$py" -c 'import json,sys; print(len(json.load(sys.stdin)["tracks"]))')"
+    nnew="$(mkvmerge -J "$tmp" | "$py" -c 'import json,sys; print(len(json.load(sys.stdin).get("tracks", [])))' 2>/dev/null || echo 0)"
+    nexp=$((nold + 1 - nexcl))
+    if [ "$nnew" -ne "$nexp" ]
+    then
+        echo "Error: the remux has $nnew tracks, expected $nexp; the original is untouched, the remux is at $tmp"
+        return 5
+    fi
+    put_counts() { ffprobe -v error -count_packets -select_streams "$2" -show_entries stream=nb_read_packets -of csv=p=0 "$1" | tr '\n' ' '; }
+    if [ "$(put_counts "$input" v)$(put_counts "$input" a)" != "$(put_counts "$tmp" v)$(put_counts "$tmp" a)" ]
+    then
+        echo "Error: video/audio packet counts differ between the original and the remux; the original is untouched, the remux is at $tmp"
+        return 5
+    fi
+    nown="$(mkvmerge -J "$tmp" | "$py" -c 'import json,sys; print(sum(1 for t in json.load(sys.stdin)["tracks"] if t["type"] == "subtitles" and t["properties"].get("tag_shiroikuma_subtitles")))')"
+    if [ "$nown" -ne 1 ]
+    then
+        echo "Error: the remux has $nown tracks tagged as this tool's, expected 1; the original is untouched, the remux is at $tmp"
+        return 5
+    fi
+    mv -f "$tmp" "$input"
+}
+#+end_src
 ** mkv — films: the driver
 :PROPERTIES:
 :VISIBILITY: children
@@ -4079,7 +4179,10 @@ the language; after all subtitle tracks when there is none.  The remux goes to a
 to the input, is verified — the same tracks in the new order plus
 one, every video and audio stream with its packet count unchanged —
 and only then replaces the original.
-**** Track order
+**** Remux, verify, replace
+=put_track= (in =Putting a track into a film=, shared with =fix-mkv=)
+does the work and leaves the original untouched unless every check
+passes.
 #+begin_src bash
 if [ ! -z "$MKVOUT" ]
 then
@@ -4087,64 +4190,14 @@ then
         ,*.mkv|*.MKV|*.mka|*.webm ) ;;
         ,* ) echo "Error: -M needs a Matroska input to update; $INPUT is not one."; exit 1 ;;
     esac
-    ORDER="$(mkvmerge -J "$INPUT" | "$PY" -c '
-import json, sys
-d = json.load(sys.stdin); lang = sys.argv[1]; extra = [int(x) for x in sys.argv[2].split(",") if x.strip()]
-iso = {"ja": "jpn", "en": "eng", "cs": "cze ces", "de": "ger deu", "fr": "fre fra", "es": "spa", "it": "ita", "ko": "kor", "zh": "chi zho", "ru": "rus", "pt": "por", "nl": "dut nld", "pl": "pol", "sv": "swe"}
-same = lambda t: (t or "").lower() == lang or (t or "").lower() in iso.get(lang, "").split()
-ids = [t["id"] for t in d["tracks"]]
-subs = [t["id"] for t in d["tracks"] if t["type"] == "subtitles"]
-own = [i for i in subs if same(d["tracks"][ids.index(i)]["properties"].get("language"))]
-srt = [i for i in own if d["tracks"][ids.index(i)]["codec"].startswith("SubRip")]
-bad = [i for i in extra if i not in srt]
-if bad: sys.exit("-R %s: not a SubRip track of %s" % (",".join(map(str, bad)), lang))
-# the tool'"'"'s own earlier SRT — tagged SHIROIKUMA_SUBTITLES (named Whisper in 2.2.x) — or one given by -R: replaced; a publisher'"'"'s SRT is kept
-own_track = lambda p: bool(p.get("tag_shiroikuma_subtitles")) or p.get("track_name") == "Whisper"
-old = [i for i in srt if own_track(d["tracks"][ids.index(i)]["properties"]) or i in extra]
-at = old[0] if old else (own[0] if own else (subs[-1] + 1 if subs else len(ids)))
-keep = [i for i in ids if i not in old]
-order = ["0:%d" % i for i in keep if i < at] + ["1:0"] + ["0:%d" % i for i in keep if i >= at]   # the track it goes before, when nothing is replaced, follows it
-prev = d["tracks"][ids.index(old[0])]["properties"] if old else {}
-print(",".join(order) + "|" + ",".join(str(i) for i in old) + "|" + ("yes" if prev.get("default_track") else "no") + "|" + {"ja": "日本語", "en": "English", "de": "Deutsch", "cs": "Čeština", "fr": "Français", "es": "Español", "it": "Italiano", "ko": "한국어", "zh": "中文", "ru": "Русский", "pl": "Polski", "pt": "Português", "nl": "Nederlands", "sv": "Svenska"}.get(lang, lang))' "$LANGCODE" "$REPLACE" 2>&1)" || { echo "Error: $ORDER"; exit 1; }
-    OLDNAME="${ORDER#*|*|*|}"; ORDER="${ORDER%|*}"      # the track is named in its own language (日本語); the replaced track's default flag is carried over
-    OLDDEF="${ORDER##*|}"; ORDER="${ORDER%|*}"
-    EXCL="${ORDER#*|}"; ORDER="${ORDER%|*}"
-    SUBOPT=(); [ ! -z "$EXCL" ] && SUBOPT=(--subtitle-tracks "!$EXCL")
-#+end_src
-**** Remux, verify, replace
-#+begin_src bash
-    TMPMKV="$INPUT.remux-tmp"
     echo "-------------------------"
-    echo "Updating $INPUT in place: inserting $OUT (track order $ORDER) ..."
+    echo "Updating $INPUT in place: inserting $OUT ..."
     echo "-------------------------"
-    rm -f "$TMPMKV"
-    TAGXML="$WORK/track-tags.xml"      # the hidden mark of the tool's own track: a player shows the name, never this
-    printf '<?xml version="1.0"?>\n<Tags><Tag><Targets/><Simple><Name>SHIROIKUMA_SUBTITLES</Name><String>%s</String></Simple></Tag></Tags>\n' "$VERSION" > "$TAGXML"
-    mkvmerge -o "$TMPMKV" "${SUBOPT[@]}" "$INPUT" --language 0:"$LANGCODE" --default-track-flag 0:"$OLDDEF" --track-name "0:$OLDNAME" --tags "0:$TAGXML" --sub-charset 0:UTF-8 "$OUT" --track-order "$ORDER" | grep -v '進行状況\|Progress' || true
-    counts() { ffprobe -v error -count_packets -select_streams "$2" -show_entries stream=nb_read_packets -of csv=p=0 "$1" | tr '\n' ' '; }
-    ntracks() { mkvmerge -J "$1" | "$PY" -c 'import json,sys; print(len(json.load(sys.stdin)["tracks"]))'; }
-    NEXCL=0; [ -z "$EXCL" ] || NEXCL=$(( $(echo "$EXCL" | tr -cd , | wc -c) + 1 ))     # SRTs of our own replaced
-    NOLD="$(ntracks "$INPUT")"; NNEW="$(ntracks "$TMPMKV")"; NEXP=$((NOLD + 1 - NEXCL))
-    if [ "$NNEW" -ne "$NEXP" ]
-    then
-        echo "Error: the remux has $NNEW tracks, expected $NEXP; the original is untouched, the remux is at $TMPMKV"
-        exit 1
-    fi
-    if [ "$(counts "$INPUT" v)$(counts "$INPUT" a)" != "$(counts "$TMPMKV" v)$(counts "$TMPMKV" a)" ]
-    then
-        echo "Error: video/audio packet counts differ between the original and the remux; the original is untouched, the remux is at $TMPMKV"
-        exit 1
-    fi
-    NOWN="$(mkvmerge -J "$TMPMKV" | "$PY" -c 'import json,sys; print(sum(1 for t in json.load(sys.stdin)["tracks"] if t["type"] == "subtitles" and t["properties"].get("tag_shiroikuma_subtitles")))')"
-    if [ "$NOWN" -ne 1 ]
-    then
-        echo "Error: the remux has $NOWN tracks tagged as this tool's, expected 1; the original is untouched, the remux is at $TMPMKV"
-        exit 1
-    fi
-    mv -f "$TMPMKV" "$INPUT"; MKVDONE=1
-    echo "Updated: $INPUT ($NNEW tracks)"
+    put_track "$INPUT" "$OUT" "$LANGCODE" "$REPLACE" "$WORK" 0 || exit 1
+    MKVDONE=1
+    echo "Updated: $INPUT"
     mkvmerge -J "$INPUT" | "$PY" -c 'import json,sys
-for t in json.load(sys.stdin)["tracks"]: print("   %2d %-9s %-22s %s" % (t["id"], t["type"], t["codec"], t["properties"].get("language", "")))'
+for t in json.load(sys.stdin)["tracks"]: print("   %2d %-9s %-22s %-4s %s" % (t["id"], t["type"], t["codec"], t["properties"].get("language", ""), t["properties"].get("track_name") or ""))'
 #+end_src
 **** Tidy up
 The SRT now lives inside the MKV; it and the review are moved into
@@ -4176,6 +4229,162 @@ echo "-------------------------"
 #+begin_src bash
 )
 #+end_src
+** fix-mkv — corrections back into the film
+Corrections made by a person, as a whole corrected copy of the tool's
+track, go back into the film.  白い熊 縁's correction mode extracts the
+track named 日本語 and tagged =SHIROIKUMA_SUBTITLES= to a working SRT
+beside the film, edits it there line by line (no remux per edit), and
+when every review cue is checked runs this, from a button, with no
+terminal.  So the output is for a program: one event per line,
+=PROGRESS 0.42=, =CHANGED n=, =FIXES path=, and =VERIFIED= last, and
+stable exit codes.
+
+Every changed line is also written to the film's corrections file
+(=~/.local/share/subtitles/fixes/<basename>.tsv=, the format =mkv -x=
+reads) as the smallest fragment that changed with a character of
+context, at the line's start time — so a later =subtitles mkv= of the
+film, a new version or =-f=, keeps the corrections instead of
+transcribing the mistakes again.
+
+=--expect-sha256= is the SHA-256 of the track as =mkvextract= wrote it
+when the working copy was taken: if the film's track is no longer that
+one (a line was edited in normal play since, which remuxes the film),
+replacing it with the older working copy would lose that edit
+silently, so it refuses instead.
+#+begin_src bash
+fix_help() {
+cat <<HELP
+${Y}${PROG} fix-mkv${R} — put a corrected copy of the tool's track back into the film
+
+${C}USAGE${R}
+    ${PROG} fix-mkv [options] FILM.mkv WORKING.srt
+
+    WORKING.srt is the film's own track (named 日本語, tagged
+    SHIROIKUMA_SUBTITLES), extracted and corrected.  It replaces that
+    track in place — same position, language and flags — after a
+    free-space check and a verified remux beside the film.
+
+${C}OPTIONS${R}
+    --review REVIEW.srt     the review the corrections came from: after
+                            VERIFIED, it and WORKING.srt are deleted
+    --expect-sha256 HEX     refuse unless the film's track is still the
+                            one extracted (sha256 of mkvextract's output)
+    -l LANG                 the track's language [ja]
+
+${C}OUTPUT${R} (stdout, one event per line)
+    PROGRESS 0.42   CHANGED n   FIXES path   VERIFIED (last, on success)
+    Changed lines go to ~/.local/share/subtitles/fixes/<basename>.tsv,
+    so a later ${PROG} mkv keeps them.
+
+${C}EXIT${R}
+    0 done   2 usage   3 no tagged track, or more than one   4 WORKING.srt
+    not UTF-8 or fails lint   5 the remux failed verification (the film is
+    untouched, the remux is kept beside it)   6 not enough space
+    7 the film's track changed since it was extracted
+HELP
+}
+
+fix_main() (
+    REVIEW=""; EXPECT=""; LANGCODE="ja"; ARGS=()
+    while [ $# -gt 0 ]
+    do
+        case "$1" in
+            --review) REVIEW="${2:-}"; shift 2 || exit 2 ;;
+            --review=*) REVIEW="${1#*=}"; shift ;;
+            --expect-sha256) EXPECT="${2:-}"; shift 2 || exit 2 ;;
+            --expect-sha256=*) EXPECT="${1#*=}"; shift ;;
+            -l) LANGCODE="${2:-}"; shift 2 || exit 2 ;;
+            -h|--help) fix_help; exit 0 ;;
+            -*) echo "Error: unknown option $1"; exit 2 ;;
+            *) ARGS+=("$1"); shift ;;
+        esac
+    done
+    [ ${#ARGS[@]} -eq 2 ] || { fix_help >&2; exit 2; }
+    FILM="${ARGS[0]}"; SRT="${ARGS[1]}"
+    case "$FILM" in *.mkv|*.MKV|*.mka|*.webm ) ;; * ) echo "Error: $FILM is not a Matroska file"; exit 2 ;; esac
+    [ -f "$FILM" ] || { echo "Error: no such film: $FILM"; exit 2; }
+    [ -f "$SRT" ] || { echo "Error: no such SRT: $SRT"; exit 2; }
+    [ -z "$REVIEW" ] || [ -f "$REVIEW" ] || { echo "Error: no such review: $REVIEW"; exit 2; }
+    iconv -f UTF-8 -t UTF-8 "$SRT" > /dev/null 2>&1 || { echo "Error: $SRT is not UTF-8"; exit 4; }
+    WORKDIR="$(mktemp -d)"; trap 'rm -rf "$WORKDIR"' EXIT
+    CLEAN="$WORKDIR/$(basename "$SRT")"     # mkvextract writes a BOM, so the working copy has one; mkvmerge drops it anyway
+    sed '1s/^\xEF\xBB\xBF//' "$SRT" > "$CLEAN"
+    if ! "$0" lint "$CLEAN" > /dev/null 2>&1
+    then
+        echo "Error: $SRT does not satisfy the app's SRT contract:"; "$0" lint "$CLEAN" 2>&1 | sed 's/^/   /'
+        exit 4
+    fi
+    TRACK="$(mkvmerge -J "$FILM" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+t = [t for t in d["tracks"] if t["type"] == "subtitles" and t["codec"].startswith("SubRip") and t["properties"].get("tag_shiroikuma_subtitles")]
+print(t[0]["id"] if len(t) == 1 else "n%d" % len(t))')"
+    case "$TRACK" in n*) echo "Error: $FILM has ${TRACK#n} SubRip tracks tagged as this tool's (SHIROIKUMA_SUBTITLES), expected 1"; exit 3 ;; esac
+    mkvextract tracks "$FILM" "$TRACK:$WORKDIR/current.srt" > /dev/null
+    if [ -n "$EXPECT" ] && [ "$(sha256sum "$WORKDIR/current.srt" | cut -d' ' -f1)" != "${EXPECT,,}" ]
+    then
+        echo "Error: the film's track changed since the working copy was taken (sha256 differs); nothing was changed"
+        exit 7
+    fi
+    BASE="$(basename "$FILM")"; BASE="${BASE%.*}"
+    FIXFILE="${XDG_DATA_HOME:-$HOME/.local/share}/subtitles/fixes/$BASE.tsv"
+    CHANGED="$(python3 - "$WORKDIR/current.srt" "$CLEAN" "$FIXFILE" <<'PYEOF'
+import difflib, os, re, sys
+def srt(path):
+    out = []
+    for b in re.split(r"\n\s*\n", open(path, encoding="utf-8-sig").read().replace("\r\n", "\n").strip()):
+        l = b.splitlines()
+        k = next((i for i, x in enumerate(l) if "-->" in x), None)
+        if k is None: continue
+        a = l[k].split("-->")[0].strip().replace(",", ".")
+        h, m, sec = a.split(":"); out.append((int(h) * 3600 + int(m) * 60 + float(sec), "\n".join(l[k + 1:]).strip()))
+    return out
+def flat(t): return re.sub(r"\n+", " " if re.search(r"[A-Za-z]\n[A-Za-z]", t) else "", t).strip()
+old, new = srt(sys.argv[1]), srt(sys.argv[2])
+if len(old) == len(new): pairs = list(zip(old, new)); unpaired = 0
+else:
+    pairs, j = [], 0
+    for o in old:
+        while j < len(new) and new[j][0] < o[0] - 0.5: j += 1
+        if j < len(new) and abs(new[j][0] - o[0]) <= 0.5: pairs.append((o, new[j])); j += 1
+    unpaired = len(old) + len(new) - 2 * len(pairs)
+lines, n = [], unpaired
+for (t, a), (_, b) in pairs:
+    a, b = flat(a), flat(b)
+    if a == b: continue
+    n += 1
+    regions = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal": continue
+        if regions and i1 - regions[-1][1] < 2: regions[-1] = [regions[-1][0], i2, regions[-1][2], j2]
+        else: regions.append([i1, i2, j1, j2])
+    for i1, i2, j1, j2 in regions:
+        while i2 - i1 < 2 and (i1 > 0 or i2 < len(a)):          # a fragment needs something of the old text to be found by
+            if i1 > 0: i1 -= 1; j1 -= 1
+            else: i2 += 1; j2 += 1
+        if a[i1:i2]: lines.append("%s\t%s\t%d:%02d:%02d" % (a[i1:i2], b[j1:j2], t // 3600, t % 3600 // 60, t % 60))
+if lines:
+    os.makedirs(os.path.dirname(sys.argv[3]), exist_ok=True)
+    have = set(open(sys.argv[3], encoding="utf-8").read().splitlines()) if os.path.exists(sys.argv[3]) else set()
+    with open(sys.argv[3], "a", encoding="utf-8") as f:
+        for ln in lines:
+            if ln not in have: f.write(ln + "\n"); have.add(ln)
+print(n)
+PYEOF
+)"
+    echo "CHANGED $CHANGED"
+    if [ "$CHANGED" -gt 0 ]
+    then
+        echo "FIXES $FIXFILE"
+        PY=python3 put_track "$FILM" "$CLEAN" "$LANGCODE" "" "$WORKDIR" 1 || exit $?
+    fi
+    echo "VERIFIED"
+    if [ -n "$REVIEW" ]
+    then
+        rm -f -- "$REVIEW" "$SRT"
+    fi
+)
+#+end_src
 ** Dispatch
 *** The overview
 =subtitles= alone, or with =-h=, says what the subcommands are.
@@ -4193,6 +4402,9 @@ ${C}SUBCOMMANDS${R}
                                       says${R}, transcribed with Whisper and timed by
                                       the original's subtitles; ${C}-M${R} puts it into
                                       the MKV in place
+    ${PROG} ${C}fix-mkv${R} FILM SRT        put a corrected copy of the film's
+                                      日本語 track back into it (白い熊 縁's
+                                      correction mode runs it)
     ${PROG} ${C}lint${R} AUDIODIR|SRT…      check SRTs against the app's parser
     ${PROG} ${C}-s${R} [--rebuild]          set up, or check, this machine for both
 
@@ -4218,6 +4430,11 @@ case "${1:-}" in
         mkv_main "$@"
         exit $?
         ;;
+    fix-mkv)
+        shift
+        fix_main "$@"
+        exit $?
+        ;;
     lint)
         shift
         epub_main --lint "$@"
@@ -4237,7 +4454,7 @@ case "${1:-}" in
         ;;
     ,*)
         overview >&2
-        die "no subcommand '$1' — it is epub, mkv or lint"
+        die "no subcommand '$1' — it is epub, mkv, fix-mkv or lint"
         ;;
 esac
 #+end_src

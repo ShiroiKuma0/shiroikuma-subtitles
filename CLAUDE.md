@@ -58,6 +58,11 @@ written with a leading `,` (Org's escape), indented or not; it tangles back.
   (or one given with `-R`). Never go back to replacing every SubRip
   track of the language: Snatch, 座頭市, 相撲道 and 四股踏んじゃった。 carry the
   publisher's Japanese as SubRip, and it would be deleted.
+- `subtitles fix-mkv FILM WORKING.srt` puts 白い熊's corrections (made in
+  白い熊 縁's correction mode) back into the tagged track, through the same
+  `put_track` as `-M`, and appends each changed fragment to the film's fixes
+  TSV so a rerun keeps it. Its stdout lines and exit codes are a contract
+  with Yosuga — change them only together with the Yosuga chat.
 
 ## Things that are load-bearing — do not "simplify" them
 
