@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 2.5.0 - description
+* subtitles - version 2.6.0 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -208,6 +208,10 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   into the Hugging Face cache; the ECAPA speaker model (80 MB) into
   =/tmp/subtitles/models=.
 * Changelog
+** 2.6.0
+*** 2026-11-06_18-22-45 UTC (金曜日)
+**** Two speakers whose lines meet across a pause are no longer one sentence (Terminator 2, 1:08:16: 何をしたの2ヶ月後に画期的なマイクロプロセッサーを開発する — Sarah's "Why him?" and the T-800's answer, a second apart). Three faults together: Whisper stamped the "2" from the end of の across the whole silence, so with its early lean the word joined Sarah's phrase; the label smoothing ruled a change of voice between two kanji "inside a word" before looking at the pause, so 誰 | 直接 a second apart undid the change and the whole scene became one voice; and the whole-sentence pass rejoined the two cues, の not being a final form. Words now join phrases with Whisper's measured lean taken out; a pause, a Whisper segment edge or a VAD phrase edge makes a change of voice legal (but still not inside a kanji or katakana compound); and where two cues meet at a change of voice that the original ends a sentence at and the two voices bear out, the sentence ends.
+**** A difference of speaker labels alone no longer dashes a cue: both lines must last 1 s and their own voices must differ, and the voice test across two check cues needs lines of 0.5 s — with the smoothing fixed the labels change more often, and a 0.23 s おい padded to a second measured its neighbour's voice (Terminator 2, 38:18: - おい / - うるさいぞ, one speaker). Terminator 2: 5 sentences better, none worse; Mission: Impossible III: 9 better, 3 worse (two of them one voice the speaker model cannot tell from itself, 0.06).
 ** 2.5.0
 *** 2026-11-03_00-30-00 UTC (火曜日)
 **** fix-mkv records a correction as the whole line — LINE, old line, new line, start time — and subtitles mkv applies such entries to the finished cue whose start and text match, after the cues are built. 2.4.0 recorded the smallest changed fragment, which the corrections file applies to Whisper's raw words before assembly, where it can match twice: Shot Caller, 11:47, ナイスシュート (Whisper wrote it twice over one utterance) corrected to ナイス gave シュート→nothing, which would have cut it from both segments, and the repeat handling would have written ナイス、ナイス. A line break the person made is kept; an emptied line drops the cue; a line no longer there is reported as matching nothing, in the summary and the review.
@@ -362,7 +366,7 @@ extras =subtitles -s= installs.
 # Tangled from subtitles.org in ~/git/shiroikuma-subtitles.  Edit that, never
 # this file: the next tangle overwrites it.
 
-VERSION="2.5.0"
+VERSION="2.6.0"
 VENV="${SUBTITLES_VENV:-$HOME/venv.shiroikuma-subtitles}"
 REPO="${SUBTITLES_REPO:-$HOME/git/shiroikuma-subtitles}"
 GITURL="https://github.com/ShiroiKuma0/shiroikuma-subtitles"
@@ -1816,9 +1820,16 @@ def apply_line_fixes(cues, fixes):
 The unit of voice identity is a stretch of speech between silences of
 ≥ =PHRASE_GAP= — found by a fine VAD pass over the audio, not by
 Whisper's word gaps, which inside a segment are absorbed into the
-neighbouring words.  Each token joins the phrase it overlaps most (a
-tolerance of =EDGE_TOL= for Whisper's early lean), in time order and
-never an earlier phrase than the token before it.  A token overlapping
+neighbouring words.  Each token joins the phrase it overlaps most, in
+time order and never an earlier phrase than the token before it.
+Whisper's times run early, by a lean measured on the film (≈ 0.25 s),
+so the tokens are placed twice: once with a tolerance of =EDGE_TOL=,
+which is enough to measure the lean, then again shifted by it with
+half the tolerance.  Without the shift the first token after a pause
+lands in the phrase before it — Whisper stamped the "2" of
+何をしたの | 2ヶ月後に from the end of の across a whole second of
+silence (Terminator 2, 1:08:17), and Sarah's question took the first
+word of the T-800's answer.  A token overlapping
 no phrase joins the nearest phrased token of its own Whisper segment
 (Whisper often stretches a segment's first token back into the silence
 before it); with none in its segment it stays without a phrase —
@@ -1840,15 +1851,26 @@ def make_phrases(x, sr, segs, cache, cues=()):
     for si, seg in enumerate(segs):
         for w in seg["words"]: w["seg"] = si
     words = sorted((w for seg in segs for w in seg["words"] if w["w"].strip()), key=lambda w: w["start"])
-    starts = [p_["start"] for p_ in phr]; cur = 0
+    starts = [p_["start"] for p_ in phr]
+    def assign(L, tol):
+        cur = 0
+        for w in words:
+            a_, b_ = w["start"] + L - tol, w["end"] + L + tol
+            lo = max(cur, bisect.bisect_right(starts, a_) - 1); hi = bisect.bisect_right(starts, b_)
+            best, bo = None, 0.0
+            for j in range(max(lo, 0), min(hi, len(phr))):
+                o = min(b_, phr[j]["end"]) - max(a_, phr[j]["start"])
+                if o > bo: best, bo = j, o
+            w["phr"] = best
+            if best is not None: cur = best
+    assign(0.0, EDGE_TOL)
+    # Whisper's word times run early: the first word after a pause can lie mostly inside the phrase before it.
+    # Measure the lean on this assignment, then assign again with the words where the speech is.
+    by = {}
     for w in words:
-        lo = max(cur, bisect.bisect_right(starts, w["start"] - EDGE_TOL) - 1); hi = bisect.bisect_right(starts, w["end"] + EDGE_TOL)
-        best, bo = None, 0.0
-        for j in range(max(lo, 0), min(hi, len(phr))):
-            o = min(w["end"] + EDGE_TOL, phr[j]["end"]) - max(w["start"] - EDGE_TOL, phr[j]["start"])
-            if o > bo: best, bo = j, o
-        w["phr"] = best
-        if best is not None: cur = best
+        if w["phr"] is not None: by.setdefault(w["phr"], dict(start=phr[w["phr"]]["start"], end=phr[w["phr"]]["end"], words=[]))["words"].append(w)
+    L = whisper_lean(by)
+    if L > 0: assign(L, EDGE_TOL/2)
     # a word overlapping no phrase: the phrase of the nearest phrased word of its own Whisper segment, else none
     for i, w in enumerate(words):
         if w["phr"] is not None: continue
@@ -1888,11 +1910,15 @@ def cluster_voices(phr, E):
 **** Robust labels
 Whisper's word times are ±0.3 s.  A change of label between two runs
 of words is therefore placed at the best legal token boundary near the
-audio silence — legal: the two tokens are ≥ =PHRASE_GAP= apart or a
-VAD/cue edge lies within =EDGE_TOL= of them, the token after it does
-not begin with a small kana or ー, and the boundary is not inside a
-katakana or kanji compound — searching two tokens either side; without
-one, the change is dropped.  A run is also dropped (absorbed by the
+audio silence — legal: the token after it does not begin with a small
+kana or ー, and the two tokens are ≥ =PHRASE_GAP= apart or in two
+Whisper segments; else the boundary is not inside a katakana or kanji
+compound and the tokens lie in two VAD phrases, or a VAD/cue edge lies
+within =EDGE_TOL= of them — searching two tokens either side; without
+one, the change is dropped.  The pause comes before the compound test:
+誰 | 直接, a second apart (Terminator 2, 1:08:03), is two kanji but no
+word, and ruling it one undid the change and made a whole scene of two
+speakers one voice.  A run is also dropped (absorbed by the
 neighbour nearer in time) when it is shorter than =RUN_MIN_WORDS= or
 =RUN_MIN_SEC=, or when its own voice embedding is not clearly different
 from the previous run's (cosine similarity ≥ =SPK_CONTRAST=) — cluster
@@ -1908,8 +1934,10 @@ def legal_boundary(words, j, bounds):
     a, b = words[j-1], words[j]
     ta, tb = a["w"].strip(), b["w"].strip()
     if not ta or not tb or tb[:1] in NO_LINE_START: return False
+    if b["start"] - a["end"] >= PHRASE_GAP: return True                  # a pause, or two Whisper segments: no word spans them
+    if a.get("seg") is not None and b.get("seg") is not None and a["seg"] != b["seg"]: return True
     if (is_kata(ta[-1]) and is_kata(tb[0])) or (is_kanji(ta[-1]) and is_kanji(tb[0])): return False   # inside a word
-    if b["start"] - a["end"] >= PHRASE_GAP: return True
+    if a.get("phr") is not None and b.get("phr") is not None and a["phr"] != b["phr"]: return True    # a silence between them
     i = bisect.bisect_left(bounds, a["end"] - EDGE_TOL)
     return i < len(bounds) and bounds[i] <= b["start"] + EDGE_TOL
 
@@ -2433,7 +2461,9 @@ language's =dash= — for Japanese the half-width hyphen and a space
 long-vowel ー at a line's start would read as part of the word.  The lines must part
 at a turn — not at a break by length — and then one of three things
 must say that the voice changes there:
-- the speaker labels of the two lines differ;
+- the speaker labels of the two lines differ, both lines last at least
+  1 s, and their own voices differ (the third test's embeddings) —
+  labels alone dashed lines of one speaker (- 残念だが / - そうはいかない);
 - a two-speaker cue of the check track lies over the cue's speech —
   the original's subtitles begin each speaker's line with a dash
   (=-I am, sir.= / =-I'm not on you yet.=);
@@ -2470,14 +2500,20 @@ def line_voice(x, sr, a, b):
     with torch.no_grad(): e = _ENC.encode_batch(torch.from_numpy(x[a0:b0]).unsqueeze(0).to("cuda:0")).squeeze().cpu().numpy()
     return e/(np.linalg.norm(e) + 1e-9)
 
+VOICE_MIN_LINE = 0.5
+
 def two_speakers(g, lines, cfg, check, sp_st, sp_en, x=None, sr=None, lean=0.2):
     """the two lines of a cue are two speakers: they part at a turn, and the voices differ, or the check track has a
     two-speaker cue here, or the lines lie under two check cues and their own voices differ"""
     j = next((j for j in range(1, len(g)) if clean_text(g[:j], cfg) == lines[0]), None)
     if j is None: return False
     voice, pts, weak = turn_tiers(g, cfg)
-    if j in voice: return True
-    if j not in pts and j not in weak: return False
+    def contrast():
+        va = line_voice(x, sr, g[0]["start"] + lean, g[j-1]["end"] + lean); vb = line_voice(x, sr, g[j]["start"] + lean, g[-1]["end"] + lean)
+        return float(va @ vb) < SPK_CONTRAST
+    short = min(g[j-1]["end"] - g[0]["start"], g[-1]["end"] - g[j]["start"])
+    if j in voice and short >= 1.0 and (x is None or contrast()): return True
+    if j not in pts and j not in weak and j not in voice: return False
     for s, e, dlg in check:
         if dlg and min(e, sp_en) - max(s, sp_st) > 0.5*min(e - s, sp_en - sp_st): return True
     if x is None: return False
@@ -2485,9 +2521,8 @@ def two_speakers(g, lines, cfg, check, sp_st, sp_en, x=None, sr=None, lean=0.2):
         m = float(np.median([(w["start"] + w["end"])/2 for w in ws]))
         return next((k for k, (s, e, _) in enumerate(check) if s <= m <= e + 0.3), None)
     ka, kb = under(g[:j]), under(g[j:])
-    if ka is None or kb is None or ka == kb: return False
-    va = line_voice(x, sr, g[0]["start"] + lean, g[j-1]["end"] + lean); vb = line_voice(x, sr, g[j]["start"] + lean, g[-1]["end"] + lean)
-    return float(va @ vb) < SPK_CONTRAST
+    if ka is None or kb is None or ka == kb or short < VOICE_MIN_LINE: return False
+    return contrast()
 #+end_src
 **** Speech edges of a group of words
 The VAD phrases give the real edges of the speech: a cue's speech
@@ -2532,7 +2567,29 @@ def conf(ws):
     """mean word probability of a cue (0..1)"""
     p = [w.get("p", 1.0) for w in ws]; return sum(p)/len(p) if p else 1.0
 
-def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None, check=(), voices=True):
+def sentence_ends(check):
+    """times where a cue of the original ends a sentence: . ? ! (not an ellipsis)"""
+    return [e for s, e, t in check if re.search(r"(?<!\.)[.?!](</?i>|[\"')\]])*\s*$", t.strip())]
+
+def mark_turns(out, ends, x, sr, lean):
+    """where two cues meet at a change of voice that the original ends a sentence at and the two voices bear out,
+    the last word of the first carries turn_after: whole sentences end there"""
+    for a, b in zip(out, out[1:]):
+        wa, wb = a.get("ws"), b.get("ws")
+        if not wa or not wb: continue
+        p, q = wa[-1], wb[0]
+        if p.get("spk") is None or q.get("spk") is None or p["spk"] == q["spk"] or illegal(p, q): continue
+        if not any(p["end"] - 1.0 <= t <= q["start"] + 1.0 for t in ends): continue
+        k = len(wa)
+        while k > 0 and wa[k-1].get("spk") == p["spk"]: k -= 1
+        m = 0
+        while m < len(wb) and wb[m].get("spk") == q["spk"]: m += 1
+        ra, rb = wa[k:], wb[:m]
+        if min(ra[-1]["end"] - ra[0]["start"], rb[-1]["end"] - rb[0]["start"]) < VOICE_MIN_LINE: continue
+        va = line_voice(x, sr, ra[0]["start"] + lean, ra[-1]["end"] + lean); vb = line_voice(x, sr, rb[0]["start"] + lean, rb[-1]["end"] + lean)
+        if float(va @ vb) < SPK_CONTRAST: p["turn_after"] = True
+
+def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None, check=(), voices=True, ends=()):
     for si, seg in enumerate(segs):
         for w in seg["words"]: w["seg"] = si
     phrases = None
@@ -2567,16 +2624,17 @@ def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None, check=(),
                 pl = cue_text(p_, cfg, check=check) or cue_text(p_, cfg, strict=False) or [clean_text(p_, cfg)]
                 if len(pl) == 2 and two_speakers(p_, pl, cfg, check, a_, b_, x if voices else None, sr, lean): pl = [cfg["dash"] + l for l in pl]
                 out.append(dict(start=st if k == 0 else a_, end=en if k == len(parts)-1 else max(b_ - GAP, (st if k == 0 else a_) + MIN_DUR),
-                                text="\n".join(pl), logprob=conf(p_), multi=False, sp_st=a_, sp_en=b_))
+                                text="\n".join(pl), logprob=conf(p_), multi=False, sp_st=a_, sp_en=b_, ws=p_))
         else:
             if len(lines) == 2 and two_speakers(g, lines, cfg, check, sp_st, sp_en, x if voices else None, sr, lean): lines = [cfg["dash"] + l for l in lines]
-            out.append(dict(start=st, end=en, text="\n".join(lines), logprob=conf(g), multi=len(lines) == 2 and len(turn_points(g, cfg)) > 0, sp_st=sp_st, sp_en=sp_en))
+            out.append(dict(start=st, end=en, text="\n".join(lines), logprob=conf(g), multi=len(lines) == 2 and len(turn_points(g, cfg)) > 0, sp_st=sp_st, sp_en=sp_en, ws=g))
     # speech the reference has no cue for
     if outside:
         free = build_cues(make_units([dict(words=outside, avg_logprob=0.0, text="")], [], cfg), [], cfg)
         out += [dict(start=a, end=b, text=t, logprob=lp, multi=m, sp_st=a + LEAD, sp_en=b - LINGER) for a, b, t, lp, m in free]
     out = [c for c in out if re.search(r"\w", c["text"])]       # a cue of bare punctuation or a dash is nothing
     out.sort(key=lambda c: c["start"])
+    if x is not None and voices: mark_turns(out, ends, x, sr, lean)
     for c in out:
         if c["end"] - c["start"] < MIN_DUR: c["end"] = c["start"] + MIN_DUR
     # colliding neighbours: the earlier cue keeps its speech, the later one starts after it — unless the speech itself overlaps
@@ -2606,13 +2664,23 @@ cues' characters are aligned with Whisper's words (=SequenceMatcher=,
 =autojunk= off), and a sentence ends after a character whose word
 closes a sentence — punctuation, a final form or final particle from
 MeCab (=se=), or the end of a Whisper segment — at the end of a line of
-two speakers (a turn), at the cue's own =?= or =!=, and wherever two
-cues are more than =SENT_GAP= apart.  A sentence that begins or ends
+two speakers (a turn), at the cue's own =?= or =!=, wherever two
+cues are more than =SENT_GAP= apart, and where two cues meet at a
+change of voice (=turn_after=, below).  A sentence that begins or ends
 where a cue did keeps that edge; one that ends inside a cue takes its
 last word's end plus =SENT_TAIL=, clamped to the cue.  A cue is then as
 many lines of =sentline= characters as the sentence needs, broken at
 MeCab bunsetsu boundaries, after punctuation first.  =-g cue= keeps
 the reference-sized cues.
+
+A change of voice where two cues meet is marked by the assembly
+(=mark_turns=) and needs three things: the speaker labels change at a
+legal boundary, the original's subtitles end a sentence (=.=, =?=, =!=,
+not an ellipsis) within a second of it, and the voices of the two runs
+— each at least =VOICE_MIN_LINE= — differ by the line test.  Without
+it 何をしたの (no final form) ran on into the T-800's answer.  Labels
+alone would cut one speaker's sentence wherever the clustering
+wavers; the original's sentence end is what makes a turn there likely.
 #+begin_src python
 SENT_GAP, SENT_TAIL = 2.0, 0.25
 
@@ -2628,12 +2696,12 @@ def whole_sentences(out, segs, cfg):
             for ch in line: C.append(ch); cue_of.append(ci); hard.append(False)
             if turn and li < len(lines) - 1 and hard: hard[-1] = True
         if sep and ci + 1 < len(out): C.append(" "); cue_of.append(ci); hard.append(False)
-    W, wtime, wend = [], [], []
+    W, wtime, wend, wword = [], [], [], []
     for s in sorted(segs, key=lambda s: s["start"]):
         ws = [w for w in s["words"] if w["w"].strip()]
         for k, w in enumerate(ws):
             t = w["w"].strip() + sep
-            for ch in t: W.append(ch); wtime.append((w["start"], w["end"])); wend.append(False)
+            for ch in t: W.append(ch); wtime.append((w["start"], w["end"])); wend.append(False); wword.append(w)
             if w.get("se") or k == len(ws) - 1 or re.search("[" + re.escape(pend) + "]$", w["w"].strip()):
                 wend[-1 - len(sep)] = True
     import difflib
@@ -2645,6 +2713,9 @@ def whole_sentences(out, segs, cfg):
             return False
         if hard[i] or C[i] in pend: return True
         j = cmap[i]
+        if j is not None and i + 1 < len(C) and cue_of[i + 1] != cue_of[i] and cmap[i + 1] is not None:
+            a, b = wword[j], wword[cmap[i + 1]]       # where two cues meet, a change of voice ends the sentence
+            if a is not b and a.get("turn_after"): return True
         return j is not None and (wend[j] or (j + 1 < len(W) and W[j + 1] in pend))
     cue_first, cue_last = {}, {}
     for k, ci in enumerate(cue_of): cue_first.setdefault(ci, k); cue_last[ci] = k
@@ -3668,7 +3739,7 @@ def cmd_run(a):
         for seg in merged:
             for w in seg["words"]: w.pop("emb", None)
     if not cues: mark_word_boundaries(merged, cfg)
-    out = assemble_by_reference(merged, cues, cfg, x, sr, a.work, [(s, e, dialogue_cue(t)) for s, e, t in check], a.speakers) if cues else build_cues(make_units(merged, cues, cfg), cues, cfg)
+    out = assemble_by_reference(merged, cues, cfg, x, sr, a.work, [(s, e, dialogue_cue(t)) for s, e, t in check], a.speakers, sentence_ends(check)) if cues else build_cues(make_units(merged, cues, cfg), cues, cfg)
     if a.group == "sentence":
         sents = whole_sentences(out, merged, cfg)
         print("  whole sentences: %d cues -> %d sentences" % (len(out), len(sents)), flush=True)
