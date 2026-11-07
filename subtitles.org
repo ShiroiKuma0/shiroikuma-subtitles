@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 2.6.0 - description
+* subtitles - version 2.6.1 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -208,6 +208,11 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   into the Hugging Face cache; the ECAPA speaker model (80 MB) into
   =/tmp/subtitles/models=.
 * Changelog
+** 2.6.1
+*** 2026-11-07_09-24-16 UTC (土曜日)
+**** 2.6.0 cut one speaker's sentence in two wherever the voice clustering wavered between two of its phrases (骨を固定したら / 病院へ連れて行くよ, この / 標識みたいな, 先鋒戦東 / 三国くん — 150 new breaks over 40 films, a third of them false). Japanese now asks the grammar first: a line ending in a comma, a case particle, an adverb or pre-noun word, a conditional, an adverbial に, or — with no pause — は, も or だけ, runs on, and no turn or two-speaker dash is placed after it. The voice embeddings could not tell these apart (one speaker 0.05–0.35, real turns −0.01–0.26). と, って or だけ after a verb (会わないと, 言っただけ) and the contracted なきゃ stay open: they end sentences. The original's sentence end must lie within 0.5 s of a turn between cues, not 1 s. Against 2.6.0 over 40 films: 118 lines one again, 25 new breaks; the turns 2.6.0 found (Terminator 2, 1:08:16 and 38:35; The Matrix, 1:18:54 and 1:35:35; Mission: Impossible II, III, Rogue Nation 1:54:20 and Fallout 34:19) are kept.
+**** A line the VAD missed no longer comes out after the line that follows it (Mission: Impossible II, 1:10:07: これから8分間は通信不可能になる before もうじきエアフィルターが起動する時間だ; Nineteen Eighty-Four, 29:24). A word in no phrase joins its segment's phrase only within 0.5 s of it; before, one word touching the next phrase pulled the whole quiet line in, and its cue started there. 50 cues out of their words' order over 40 films in 2.6.0, 8 now — and three older ones are mended (黄昏清兵衛: あなた、また人を斬ってらしたんですか?).
+**** The original's sentence ends are found under any tag: lines wrapped in <font> (Enter the Dragon, The Dark Knight Rises) had none.
 ** 2.6.0
 *** 2026-11-06_18-22-45 UTC (金曜日)
 **** Two speakers whose lines meet across a pause are no longer one sentence (Terminator 2, 1:08:16: 何をしたの2ヶ月後に画期的なマイクロプロセッサーを開発する — Sarah's "Why him?" and the T-800's answer, a second apart). Three faults together: Whisper stamped the "2" from the end of の across the whole silence, so with its early lean the word joined Sarah's phrase; the label smoothing ruled a change of voice between two kanji "inside a word" before looking at the pause, so 誰 | 直接 a second apart undid the change and the whole scene became one voice; and the whole-sentence pass rejoined the two cues, の not being a final form. Words now join phrases with Whisper's measured lean taken out; a pause, a Whisper segment edge or a VAD phrase edge makes a change of voice legal (but still not inside a kanji or katakana compound); and where two cues meet at a change of voice that the original ends a sentence at and the two voices bear out, the sentence ends.
@@ -366,7 +371,7 @@ extras =subtitles -s= installs.
 # Tangled from subtitles.org in ~/git/shiroikuma-subtitles.  Edit that, never
 # this file: the next tangle overwrites it.
 
-VERSION="2.6.0"
+VERSION="2.6.1"
 VENV="${SUBTITLES_VENV:-$HOME/venv.shiroikuma-subtitles}"
 REPO="${SUBTITLES_REPO:-$HOME/git/shiroikuma-subtitles}"
 GITURL="https://github.com/ShiroiKuma0/shiroikuma-subtitles"
@@ -1832,10 +1837,18 @@ silence (Terminator 2, 1:08:17), and Sarah's question took the first
 word of the T-800's answer.  A token overlapping
 no phrase joins the nearest phrased token of its own Whisper segment
 (Whisper often stretches a segment's first token back into the silence
-before it); with none in its segment it stays without a phrase —
-never the previous line's phrase across a silence, which would make
-two lines far apart look like one stretch of speech.
+before it) — when it lies within =FILL_MAX= of that phrase; with
+none in its segment, or farther, it stays without a phrase — never the
+previous line's phrase across a silence, which would make two lines
+far apart look like one stretch of speech.  The limit is for a line the
+VAD missed: Mission: Impossible II, 1:10:07, もうじきエアフィルターが
+起動する時間だ was spoken too quietly for it, its last word touched
+the next phrase once shifted by the lean, and the rest of its segment
+followed — the line's cue then started with the next phrase and came
+out after the line that follows it.
 #+begin_src python
+FILL_MAX = 0.5
+
 def make_phrases(x, sr, segs, cache, cues=()):
     if os.path.exists(cache): fine = json.load(open(cache))
     else:
@@ -1877,7 +1890,9 @@ def make_phrases(x, sr, segs, cache, cues=()):
         prv = next((v for v in reversed(words[:i]) if v["phr"] is not None), None)
         nxt = next((v for v in words[i+1:] if v["phr"] is not None), None)
         cand = [v for v in (prv, nxt) if v is not None and v["seg"] == w["seg"]]
-        if cand: w["phr"] = min(cand, key=lambda v: abs(v["start"] - w["start"]))["phr"]
+        if cand:
+            k = min(cand, key=lambda v: abs(v["start"] - w["start"]))["phr"]
+            if max(phr[k]["start"] - (w["end"] + L), (w["start"] + L) - phr[k]["end"], 0.0) <= FILL_MAX: w["phr"] = k
     for w in words:
         if w["phr"] is not None: phr[w["phr"]]["words"].append(w)
     phr = [p_ for p_ in phr if p_["words"]]        # the VAD edges are kept as they are: they are the real speech edges
@@ -1911,14 +1926,18 @@ def cluster_voices(phr, E):
 Whisper's word times are ±0.3 s.  A change of label between two runs
 of words is therefore placed at the best legal token boundary near the
 audio silence — legal: the token after it does not begin with a small
-kana or ー, and the two tokens are ≥ =PHRASE_GAP= apart or in two
-Whisper segments; else the boundary is not inside a katakana or kanji
-compound and the tokens lie in two VAD phrases, or a VAD/cue edge lies
-within =EDGE_TOL= of them — searching two tokens either side; without
-one, the change is dropped.  The pause comes before the compound test:
-誰 | 直接, a second apart (Terminator 2, 1:08:03), is two kanji but no
-word, and ruling it one undid the change and made a whole scene of two
-speakers one voice.  A run is also dropped (absorbed by the
+kana or ー, and the two tokens are ≥ =PHRASE_GAP= apart; else the
+boundary is not inside a katakana or kanji compound and the tokens lie
+in two VAD phrases, or a VAD/cue edge lies within =EDGE_TOL= of them —
+searching two tokens either side; without one, the change is dropped.
+The pause comes before the compound test: 誰 | 直接, a second apart
+(Terminator 2, 1:08:03), is two kanji but no word, and ruling it one
+undid the change and made a whole scene of two speakers one voice.  A
+Whisper segment edge is legal too: Whisper ends segments inside one
+speaker's sentence as well (骨を固定したら | 病院へ連れて行くよ), but there
+the grammar check (=runs_on=) keeps the line whole, and without the
+edge real turns were lost (Fallout, 34:19: 祈るなんて作戦があるか | 新入り;
+Rogue Nation, 1:54:20: どうします | 女を殺せ).  A run is also dropped (absorbed by the
 neighbour nearer in time) when it is shorter than =RUN_MIN_WORDS= or
 =RUN_MIN_SEC=, or when its own voice embedding is not clearly different
 from the previous run's (cosine similarity ≥ =SPK_CONTRAST=) — cluster
@@ -2064,6 +2083,50 @@ def ja_breaks(text):
         elif f.pos2 == "接続助詞" and not attached: cl.add(off)
         elif f.pos1 in ("動詞", "形容詞") and (f.cForm or "").startswith("連用形") and nx is not None and nx.pos1 in HEAD_POS: cl.add(off)
     return se, cl
+#+end_src
+**** A sentence that runs on
+Two lines that part where the sentence plainly goes on are one
+speaker's, whatever the voices say: the first ends in a comma, a case
+particle (を, に, が, の…), an adverb or a pre-noun word (もう, この), a
+conditional (たら, ば) or an adverbial に (確かに, 無事に), or a サ変
+noun meets its する (失礼 | します); or, with no pause between them, a
+topic or adverbial particle after a noun (は, も, だけ).  A word that can end what
+someone says leaves it open — か, の, よ, ね, けど, a て-form, a bare
+noun (いいえ長官 | ダメだ), and は after a pause (人数は? | ワンサといるよ).
+After a verb or auxiliary, と, って and だけ end sentences often enough
+(ウィドウと会わないと | 会うのはあいつだろ, 言っただけ | 何を見たの) to stay
+open, except the concessive after a volitional form (どうなろうと |
+生き延びて…); so does the contracted conditional なきゃ (行かなきゃ |
+モーフィアスは…), which ends a sentence as "must".  あの, この and その
+before a noun run on even where MeCab reads a filler (あの | 人は).
+Dubbed speech is too elliptic for more: an imperative (飛び込め),
+お願い, a sentence-final から or のに all end real turns.
+
+The voice embeddings cannot make this call.  At these places one
+speaker's two phrases measured 0.05–0.35 apart, real turns −0.01–0.26.
+fugashi reuses its nodes, so
+each line's words are read out before the next is tagged.
+#+begin_src python
+def runs_on(wa, wb):
+    """Japanese: the sentence plainly runs on from the words wa into wb, so no new speaker starts between them"""
+    tg = tagger()
+    ta = "".join(w["w"].strip() for w in wa); tb = "".join(w["w"].strip() for w in wb)
+    if tg is None or not ta or not tb: return False
+    if ta[-1] in "、，,": return True
+    a = [(w.surface, w.feature) for w in tg(ta)]       # fugashi reuses its nodes: read them before tagging again
+    b = [(w.surface, w.feature) for w in tg(tb)]
+    if not a or not b: return False
+    (sa, f), (_, nf) = a[-1], b[0]
+    pf = a[-2][1] if len(a) > 1 else None
+    after_pred = pf is not None and pf.pos1 in ("動詞", "助動詞", "形容詞")
+    pause = wb[0]["start"] - wa[-1]["end"] >= PHRASE_GAP
+    if f.pos1 == "助詞":
+        if after_pred and (sa in ("と", "って") or f.pos2 == "副助詞"): return (pf.cForm or "").startswith("意志推量形")   # 会わないと | ; どうなろうと runs on
+        return f.pos2 == "格助詞" or (f.pos2 in ("係助詞", "副助詞") and sa != "か" and not pause)
+    if f.pos1 in ("副詞", "連体詞", "接頭辞"): return True
+    if sa in ("あの", "この", "その") and nf.pos1 in ("名詞", "代名詞"): return True                 # あの | 人は: tagged a filler, read as a pre-noun word
+    if f.pos1 in ("動詞", "形容詞", "助動詞") and (f.cForm == "仮定形-一般" or f.cForm == "連用形-ニ"): return True
+    return f.pos1 == "名詞" and "サ変" in (f.pos3 or "") and nf.pos1 == "動詞" and nf.lemma == "為る"
 #+end_src
 **** Marking the tokens
 Every token gets =wb=: the boundary bonus at its start when a line may
@@ -2459,8 +2522,10 @@ A cue whose two lines are two speakers marks each line with the
 language's =dash= — for Japanese the half-width hyphen and a space
 (=- まさか= / =- もちろん=), as in Netflix's Japanese style guide; a
 long-vowel ー at a line's start would read as part of the word.  The lines must part
-at a turn — not at a break by length — and then one of three things
-must say that the voice changes there:
+at a turn — not at a break by length — where the sentence does not
+plainly run on (=runs_on=: この / 標識みたいな is one speaker whatever
+the check track says), and then one of three things must say that the
+voice changes there:
 - the speaker labels of the two lines differ, both lines last at least
   1 s, and their own voices differ (the third test's embeddings) —
   labels alone dashed lines of one speaker (- 残念だが / - そうはいかない);
@@ -2507,6 +2572,7 @@ def two_speakers(g, lines, cfg, check, sp_st, sp_en, x=None, sr=None, lean=0.2):
     two-speaker cue here, or the lines lie under two check cues and their own voices differ"""
     j = next((j for j in range(1, len(g)) if clean_text(g[:j], cfg) == lines[0]), None)
     if j is None: return False
+    if not cfg["spaces"] and runs_on(g[:j], g[j:]): return False
     voice, pts, weak = turn_tiers(g, cfg)
     def contrast():
         va = line_voice(x, sr, g[0]["start"] + lean, g[j-1]["end"] + lean); vb = line_voice(x, sr, g[j]["start"] + lean, g[-1]["end"] + lean)
@@ -2568,10 +2634,12 @@ def conf(ws):
     p = [w.get("p", 1.0) for w in ws]; return sum(p)/len(p) if p else 1.0
 
 def sentence_ends(check):
-    """times where a cue of the original ends a sentence: . ? ! (not an ellipsis)"""
-    return [e for s, e, t in check if re.search(r"(?<!\.)[.?!](</?i>|[\"')\]])*\s*$", t.strip())]
+    """times where a cue of the original ends a sentence: . ? ! (not an ellipsis), whatever tags wrap it"""
+    return [e for s, e, t in check if re.search(r"(?<!\.)[.?!][\"')\]]*\s*$", re.sub(r"<[^>]*>|\{[^}]*\}", "", t).strip())]
 
-def mark_turns(out, ends, x, sr, lean):
+TURN_END_TOL = 0.5
+
+def mark_turns(out, ends, x, sr, lean, cfg):
     """where two cues meet at a change of voice that the original ends a sentence at and the two voices bear out,
     the last word of the first carries turn_after: whole sentences end there"""
     for a, b in zip(out, out[1:]):
@@ -2579,7 +2647,8 @@ def mark_turns(out, ends, x, sr, lean):
         if not wa or not wb: continue
         p, q = wa[-1], wb[0]
         if p.get("spk") is None or q.get("spk") is None or p["spk"] == q["spk"] or illegal(p, q): continue
-        if not any(p["end"] - 1.0 <= t <= q["start"] + 1.0 for t in ends): continue
+        if not any(p["end"] - TURN_END_TOL <= t <= q["start"] + TURN_END_TOL for t in ends): continue
+        if not cfg["spaces"] and runs_on(wa, wb): continue
         k = len(wa)
         while k > 0 and wa[k-1].get("spk") == p["spk"]: k -= 1
         m = 0
@@ -2634,7 +2703,7 @@ def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None, check=(),
         out += [dict(start=a, end=b, text=t, logprob=lp, multi=m, sp_st=a + LEAD, sp_en=b - LINGER) for a, b, t, lp, m in free]
     out = [c for c in out if re.search(r"\w", c["text"])]       # a cue of bare punctuation or a dash is nothing
     out.sort(key=lambda c: c["start"])
-    if x is not None and voices: mark_turns(out, ends, x, sr, lean)
+    if x is not None and voices: mark_turns(out, ends, x, sr, lean, cfg)
     for c in out:
         if c["end"] - c["start"] < MIN_DUR: c["end"] = c["start"] + MIN_DUR
     # colliding neighbours: the earlier cue keeps its speech, the later one starts after it — unless the speech itself overlaps
@@ -2674,13 +2743,20 @@ MeCab bunsetsu boundaries, after punctuation first.  =-g cue= keeps
 the reference-sized cues.
 
 A change of voice where two cues meet is marked by the assembly
-(=mark_turns=) and needs three things: the speaker labels change at a
+(=mark_turns=) and needs four things: the speaker labels change at a
 legal boundary, the original's subtitles end a sentence (=.=, =?=, =!=,
-not an ellipsis) within a second of it, and the voices of the two runs
-— each at least =VOICE_MIN_LINE= — differ by the line test.  Without
-it 何をしたの (no final form) ran on into the T-800's answer.  Labels
-alone would cut one speaker's sentence wherever the clustering
-wavers; the original's sentence end is what makes a turn there likely.
+not an ellipsis, whatever tags wrap the line) within =TURN_END_TOL= of
+it, the sentence does not plainly run on (=runs_on=), and the voices of
+the two runs — each at least =VOICE_MIN_LINE= — differ by the line
+test.  Without it 何をしたの (no final form) ran on into the T-800's
+answer.  Labels alone would cut one speaker's sentence wherever the
+clustering wavers; the original's sentence end is what makes a turn
+there likely.  But only close by: the dub keeps its own sentence
+breaks, and a second either side reached a short English sentence
+beside a Japanese one that goes on (First match. / East, Mikuni. beside
+先鋒戦東 | 三国くん).  Real turns lay within 0.45 s of an English end,
+false ones 0.53–0.98 s.  Lines wrapped in =<font>= tags had no
+sentence ends at all before (Enter the Dragon, The Dark Knight Rises).
 #+begin_src python
 SENT_GAP, SENT_TAIL = 2.0, 0.25
 
