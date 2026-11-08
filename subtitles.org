@@ -2,7 +2,7 @@
 #+AUTHOR: 白い熊
 #+STARTUP: fold
 
-* subtitles - version 2.6.1 - description
+* subtitles - version 2.6.2 - description
 :PROPERTIES:
 :VISIBILITY: folded
 :END:
@@ -208,6 +208,11 @@ emacs --batch -l org --eval '(progn (setq org-confirm-babel-evaluate nil) (org-b
   into the Hugging Face cache; the ECAPA speaker model (80 MB) into
   =/tmp/subtitles/models=.
 * Changelog
+** 2.6.2
+*** 2026-11-07_19-28-16 UTC (土曜日)
+**** No more stray dash at the head of a one-speaker line (Nineteen Eighty-Four, 29:37: -平気よ; 244 such lines over 40 films). Whisper writes the dash that opens each speaker's line in the subtitles it learned on, as a word of its own, and it was kept as text. It is dropped now; the tool places its own dashes where it finds two speakers in one cue. A hyphen inside a word stays (T-800, AK-47, Wi-Fi, 50-50).
+**** A turn between cues measured its distance to the original's sentence end from Whisper's word times, which run early by the film's lean (0.30 s on Mission: Impossible II). The window now reaches that much further on the late side, so the turn after 強制的にやらせる (Mission: Impossible II, 32:05, "You're gonna try and force me to do this?" 0.35 s off once corrected) is found again, with two more real ones (Snatch, 39:48; Terminator Genisys, 1:01:02) and none lost.
+**** A line no longer breaks at a hyphen inside a word (Mission: Impossible — Ghost Protocol, 37:09: …непо / -русски?; T- / 600).
 ** 2.6.1
 *** 2026-11-07_09-24-16 UTC (土曜日)
 **** 2.6.0 cut one speaker's sentence in two wherever the voice clustering wavered between two of its phrases (骨を固定したら / 病院へ連れて行くよ, この / 標識みたいな, 先鋒戦東 / 三国くん — 150 new breaks over 40 films, a third of them false). Japanese now asks the grammar first: a line ending in a comma, a case particle, an adverb or pre-noun word, a conditional, an adverbial に, or — with no pause — は, も or だけ, runs on, and no turn or two-speaker dash is placed after it. The voice embeddings could not tell these apart (one speaker 0.05–0.35, real turns −0.01–0.26). と, って or だけ after a verb (会わないと, 言っただけ) and the contracted なきゃ stay open: they end sentences. The original's sentence end must lie within 0.5 s of a turn between cues, not 1 s. Against 2.6.0 over 40 films: 118 lines one again, 25 new breaks; the turns 2.6.0 found (Terminator 2, 1:08:16 and 38:35; The Matrix, 1:18:54 and 1:35:35; Mission: Impossible II, III, Rogue Nation 1:54:20 and Fallout 34:19) are kept.
@@ -371,7 +376,7 @@ extras =subtitles -s= installs.
 # Tangled from subtitles.org in ~/git/shiroikuma-subtitles.  Edit that, never
 # this file: the next tangle overwrites it.
 
-VERSION="2.6.1"
+VERSION="2.6.2"
 VENV="${SUBTITLES_VENV:-$HOME/venv.shiroikuma-subtitles}"
 REPO="${SUBTITLES_REPO:-$HOME/git/shiroikuma-subtitles}"
 GITURL="https://github.com/ShiroiKuma0/shiroikuma-subtitles"
@@ -2031,7 +2036,12 @@ split or a line break needs real word boundaries: MeCab (fugashi with
 unidic-lite) segments the text and tags parts of speech.  A boundary
 is allowed at a word start that begins a new bunsetsu — not before a
 particle, an auxiliary, a suffix, or a verb attached by て/で — and
-scores a bonus after a particle, an auxiliary or punctuation.  Without
+scores a bonus after a particle, an auxiliary or punctuation.  Never
+on either side of a hyphen inside a word: MeCab parts T-600 and
+по-русски at the hyphen, and a line began -русски (Mission: Impossible —
+Ghost Protocol, 37:09) or ended T- once Whisper's own speaker dashes were told apart
+from hyphens.  Where no boundary fits and a line is cut by length, the
+cut moves past such a hyphen.  Without
 fugashi (or for other languages) the kana/kanji heuristics apply.
 **** Analyser
 #+begin_src python
@@ -2064,7 +2074,21 @@ def ja_boundaries(text):
                 bonus = -0.4 if pp in ("助詞", "助動詞") or pp in ("補助記号", "記号") else (-0.2 if pp in ("動詞", "形容詞") else 0.0)
                 out[off] = bonus
         off += len(surf); prev = (surf, pos)
-    return out
+    return {k: v for k, v in out.items() if not in_hyphen_word(text, k)}
+
+HYPHENS = "-‐－"
+LATIN_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁё]")
+
+def in_hyphen_word(t, k):
+    """a break at offset k would split a hyphenated word (T-|600, по|-русски)"""
+    if not 0 < k < len(t): return False
+    if t[k] in HYPHENS and LATIN_RE.match(t[k-1]): return True
+    return t[k-1] in HYPHENS and k >= 2 and LATIN_RE.match(t[k-2]) is not None and LATIN_RE.match(t[k]) is not None
+
+def hard_cut(t, k):
+    """a forced break at k, moved past a hyphen inside a word so no line starts with it"""
+    while k < len(t) - 1 and t[k] in HYPHENS and LATIN_RE.match(t[k-1]): k += 1
+    return k
 
 FINAL_FORMS = ("終止形", "命令形", "意志推量形")
 
@@ -2215,7 +2239,7 @@ def break_lines(t, cfg):
             score = abs(i-mid) + (0 if ch in "、。，！？" else (3 if ch in "はがをにでへもの" else 8))
             over = max(0, i-n) + max(0, len(t)-i-n); score += 5*over
         if best is None or score < best[0]: best = (score, i)
-    i = best[1] if best else int(mid)
+    i = best[1] if best else hard_cut(t, int(mid))
     return t[:i] + "\n" + t[i:]
 #+end_src
 **** Timing and assembly
@@ -2628,6 +2652,15 @@ as a floor).  When neighbours collide, the earlier cue keeps at least
 its speech and the later one starts after it — the reference start of
 a following line never trims a line that is still being spoken; only
 when the speech itself overlaps is the boundary the midpoint.
+
+Whisper writes the dash that opens each speaker's line in the subtitles
+it learned on, as a word of its own (=-=, then = 平=, =気=, =よ=); kept,
+it left a dash at the head of 244 one-speaker lines over 40 films.
+=speaker_dash= drops it before anything else sees the words — the
+tool places its own dashes where it finds two speakers — and keeps a
+hyphen inside a word: one glued to a Latin or Cyrillic letter or digit
+before it and to the word after it (T-800, Wi-Fi, по-русски), or ending
+a cut-off word (prou-).
 #+begin_src python
 def conf(ws):
     """mean word probability of a cue (0..1)"""
@@ -2647,7 +2680,7 @@ def mark_turns(out, ends, x, sr, lean, cfg):
         if not wa or not wb: continue
         p, q = wa[-1], wb[0]
         if p.get("spk") is None or q.get("spk") is None or p["spk"] == q["spk"] or illegal(p, q): continue
-        if not any(p["end"] - TURN_END_TOL <= t <= q["start"] + TURN_END_TOL for t in ends): continue
+        if not any(p["end"] - TURN_END_TOL <= t <= q["start"] + lean + TURN_END_TOL for t in ends): continue   # Whisper runs early by lean
         if not cfg["spaces"] and runs_on(wa, wb): continue
         k = len(wa)
         while k > 0 and wa[k-1].get("spk") == p["spk"]: k -= 1
@@ -2658,8 +2691,15 @@ def mark_turns(out, ends, x, sr, lean, cfg):
         va = line_voice(x, sr, ra[0]["start"] + lean, ra[-1]["end"] + lean); vb = line_voice(x, sr, rb[0]["start"] + lean, rb[-1]["end"] + lean)
         if float(va @ vb) < SPK_CONTRAST: p["turn_after"] = True
 
+def speaker_dash(ws, k):
+    """Whisper's own dash opening a speaker's line, copied from subtitles it learned on — not a hyphen inside a word (T-800, Wi-Fi)"""
+    if not re.fullmatch(r"\s*[-‐－–—]+\s*", ws[k]["w"]): return False
+    prev, nxt = (ws[k-1]["w"] if k else ""), (ws[k+1]["w"] if k + 1 < len(ws) else "")
+    return not (re.search(r"[0-9A-Za-zА-Яа-яЁё]$", prev) and not nxt[:1].isspace())
+
 def assemble_by_reference(segs, cues, cfg, x=None, sr=None, work=None, check=(), voices=True, ends=()):
     for si, seg in enumerate(segs):
+        seg["words"] = [w for k, w in enumerate(seg["words"]) if not speaker_dash(seg["words"], k)]
         for w in seg["words"]: w["seg"] = si
     phrases = None
     if x is not None:
@@ -2755,7 +2795,11 @@ there likely.  But only close by: the dub keeps its own sentence
 breaks, and a second either side reached a short English sentence
 beside a Japanese one that goes on (First match. / East, Mikuni. beside
 先鋒戦東 | 三国くん).  Real turns lay within 0.45 s of an English end,
-false ones 0.53–0.98 s.  Lines wrapped in =<font>= tags had no
+false ones 0.53–0.98 s.  The window reaches Whisper's lean further on
+the late side: the words' times run early by it, so the raw distance
+put a real turn 0.65 s away (Mission: Impossible II, 32:05) that is
+0.35 s from the English once corrected; shifting the whole window
+instead lost one (Fallout, 34:22).  Lines wrapped in =<font>= tags had no
 sentence ends at all before (Enter the Dragon, The Dark Knight Rises).
 #+begin_src python
 SENT_GAP, SENT_TAIL = 2.0, 0.25
@@ -2846,7 +2890,10 @@ def wrap_lines(t, cfg):
         fin = [(c + (len(t) - p - len(t) / lines) ** 2, path) for p, (c, path) in best.items() if len(t) - p <= n]
         if fin: break
         lines += 1
-    if not fin: return "\n".join(t[k:k + n] for k in range(0, len(t), n))
+    if not fin:
+        cuts = [0]
+        while len(t) - cuts[-1] > n: cuts.append(hard_cut(t, cuts[-1] + n))
+        return "\n".join(t[a:b] for a, b in zip(cuts, cuts[1:] + [len(t)]))
     e = [0] + min(fin)[1] + [len(t)]
     return "\n".join(t[a:b].strip() for a, b in zip(e, e[1:]))
 #+end_src

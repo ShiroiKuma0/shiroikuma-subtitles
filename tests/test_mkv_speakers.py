@@ -134,3 +134,41 @@ def test_the_original_ends_a_sentence_under_any_tag(film_py):
     check = [(0, 1, '<font face="sans-serif" size="71">This is very pleasant.</font>'), (1, 2, "{\\an8}Mr. Lee..."),
              (2, 3, "<i>Remote control.</i>")]
     assert film_py.sentence_ends(check) == [1, 3]
+
+
+def test_whispers_own_speaker_dash_is_dropped_but_a_hyphen_in_a_word_stays(film_py):
+    # Nineteen Eighty-Four, 29:37: Whisper wrote "- 平気よ" as the words "-", " 平", "気", "よ"
+    def ws(*t): return [word(x, i, i + 0.1) for i, x in enumerate(t)]
+    assert film_py.speaker_dash(ws("-", " 平", "気", "よ"), 0)
+    assert film_py.speaker_dash(ws("よ!", "-", "あ"), 1)                 # a second speaker inside one segment
+    assert film_py.speaker_dash(ws("ん", "-", " 頑"), 1)
+    for t, k in [(("T", "-", "800"), 1), ((" AK", "-", "47"), 1), (("i", "-", "Fi"), 1), ((" по", "-", "ру"), 1), (("prou", "-"), 1)]:
+        assert not film_py.speaker_dash(ws(*t), k), t
+    assert not film_py.speaker_dash(ws("平気"), 0)
+
+
+def test_a_turn_between_cues_allows_for_whisper_running_early(film_py, monkeypatch):
+    # Mission: Impossible II, 32:05 — 強制的にやらせる | 売り強いする…; the English sentence ends 0.65 s after the
+    # raw boundary, 0.35 s after it once Whisper's lean of 0.30 s is taken out
+    voices = iter([film_py.np.array([1.0, 0.0]), film_py.np.array([0.0, 1.0])] * 2)
+    monkeypatch.setattr(film_py, "line_voice", lambda *a_: next(voices))
+    monkeypatch.setattr(film_py, "illegal", lambda *a_: False)
+    cfg = film_py.lang_cfg("ja")
+    def pair(): return [dict(text="強制的にやらせる", ws=[word("強制的にやらせる", 1926.0, 1927.0, spk=1)]),
+                        dict(text="売り強いするのは", ws=[word("売り強いするのは", 1927.19, 1928.5, spk=2)])]
+    out = pair(); film_py.mark_turns(out, [1927.84], None, 16000, 0.30, cfg)
+    assert out[0]["ws"][-1].get("turn_after")
+    out = pair(); film_py.mark_turns(out, [1927.84], None, 16000, 0.0, cfg)
+    assert not out[0]["ws"][-1].get("turn_after")
+
+
+def test_a_line_never_breaks_at_a_hyphen_inside_a_word(film_py):
+    cfg = film_py.lang_cfg("ja")
+    # Mission: Impossible — Ghost Protocol, 37:09; Terminator Salvation, 29:54
+    for t in ["почемувыговоритенепо-русски?", "その武器は強力だがT-600は重いため動きは遅い", "OK警備は7人装備はX-1000にカメラ金属探知機予想通りだ"]:
+        for f in (film_py.wrap_lines, film_py.break_lines):
+            lines = f(t, cfg).split("\n")
+            assert "".join(lines) == t and len(lines) > 1, (f.__name__, lines)
+            assert not any(l[:1] in "-‐－" for l in lines), (f.__name__, lines)
+            if "T-600" in t or "X-1000" in t:                   # a word boundary is near: the hyphenated word stays whole
+                assert any("T-600" in l or "X-1000" in l for l in lines), (f.__name__, lines)
